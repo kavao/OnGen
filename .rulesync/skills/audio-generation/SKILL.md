@@ -81,8 +81,27 @@ python tools/sound/sfx_generator.py --preset coin -o coin --output-format all
 python tools/sound/sfx_generator.py --preset coin --play
 python tools/sound/sfx_generator.py --input-file scores/tulip.abc --format abc --style sine -o tulip
 python tools/sound/sfx_generator.py --input-file melody.abc --format abc --track-file bass.abc -o duet
+python tools/sound/sfx_generator.py --mml-dialect pyxel --input-file scores/pyxel_core_sample.mml -o output/pyxel/core_sample
+python tools/sound/sfx_generator.py --mml-dialect pyxel --max-repeat 4 --input-file scores/pyxel_repeat_sample.mml -o output/pyxel/repeat
 python -m unittest discover -s tests -v
 ```
+
+## Pyxel 向け MML
+
+Pyxel 2.4+ の MML は `--mml-dialect pyxel` で解釈する。既定 `ppmck` とは `Q` / `V` / `&` の意味が異なるため、方言を明示する。
+
+1. 1 本の MML = Pyxel の 1 Sound として `scores/pyxel_*.mml` を正本にする。
+2. OnGen で WAV を生成して試聴する（`--play` 可）。
+3. 実機へ渡すか、`pcm()` 用 WAV として配置するかを選ぶ。
+
+詳細は `docs/audio/pyxel-integration.md`。`@ENV` / `@VIB` / `@GLI` は簡易近似であり Pyxel 実機一致は非目標。
+
+```bash
+python tools/sound/sfx_generator.py --mml-dialect pyxel --input-file scores/pyxel_core_sample.mml -o output/pyxel/core_sample
+python tools/sound/sfx_generator.py --mml-dialect pyxel --pyxel-compat-report --input-file scores/ppmck_phase3_sample.mml -o /tmp/compat_check
+```
+
+4 パート合奏は MML をファイル分割し、Pyxel 側で `Music.set` 用に Sound を束ねる。PPMCK の `A`〜`E` 宣言を 1 本へマージする機能はない。
 
 ## Porting to another project
 

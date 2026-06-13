@@ -1,0 +1,6 @@
+{
+  "component": "sfx_generator",
+  "target": "tools/sound/sfx_generator.py",
+  "version": "0.4.0",
+  "description": "OnGen 単体可搬音源生成ツール（PPMCK 方言 + Pyxel 方言）"
+}

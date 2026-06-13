@@ -68,7 +68,40 @@ OnGen:       C4 = 四分音符のC（オクターブは O / > / < で指定）
 | `@v`, `@EN`, `@EP` 等のマクロ | 未対応 | エンベロープ・アルペジオマクロ |
 | `@DPCM` | 未対応 | 代替として `W(...)` を使用 |
 
-対応状況のロードマップは `_workingspace/plans/mml-compatibility-roadmap.md` にあります。
+対応状況のロードマップは `_workingspace/plans/mml-compatibility-roadmap.md` にあります。Pyxel 方言は `_workingspace/plans/pyxel-mml-compatibility-plan.md` を参照してください。
+
+## Pyxel 方言
+
+TL;DR: `--mml-dialect pyxel` で Pyxel 2.4+ の単一 Sound 用 MML を解釈します。既定は `ppmck` です。
+
+ゲーム連携の手順は [Pyxel 連携ガイド](pyxel-integration.md) を参照してください。
+
+### CLI
+
+```bash
+python tools/sound/sfx_generator.py \
+  --mml-dialect pyxel \
+  --input-file scores/pyxel_core_sample.mml \
+  -o output/pyxel/core_sample
+```
+
+### PPMCK との主な差分
+
+| コマンド | PPMCK（既定） | Pyxel 方言 |
+|---------|--------------|------------|
+| `Q` | `Q4,6` 分数＋フレーム | `Q80` 発音率 0〜100％ |
+| `V` | 0〜15 | 0〜127 |
+| `&` | 同音程のみタイ | 同音=タイ、異音=レガート |
+| `[...]` 省略 | 2 回 | `--max-repeat` 回（既定 2） |
+| `@0`〜`@3` | A/B の duty 等 | triangle / square / pulse / noise |
+| `Y` | 未対応 | デチューン（セント） |
+| `#`（音符内） | `+` と同義 | `+` と同義 |
+| `@ENV` `@VIB` `@GLI` | 未対応 | 簡易近似（完全一致非目標） |
+| `A`〜`E` トラック | 対応 | 非対応（Sound 単位の MML） |
+
+### フィクスチャ
+
+`scores/pyxel_core_sample.mml` ほか `scores/pyxel_*.mml` を unittest で参照しています。
 
 ## 実行例
 

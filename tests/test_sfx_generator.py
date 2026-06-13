@@ -1,4 +1,5 @@
 import importlib.util
+import json
 import math
 import sys
 import tempfile
@@ -47,7 +48,11 @@ load_preset = sg.load_preset
 note_name_to_freq = sg.note_name_to_freq
 parse_abc = sg.parse_abc
 parse_mml = sg.parse_mml
+parse_pyxel_mml = sg.parse_pyxel_mml
+parse_mml_by_dialect = sg.parse_mml_by_dialect
 parse_mml_source = sg.parse_mml_source
+report_pyxel_compat_issues = sg.report_pyxel_compat_issues
+PYXEL_TONE_MAP = sg.PYXEL_TONE_MAP
 resolve_track_specs = sg.resolve_track_specs
 split_ppmck_tracks = sg.split_ppmck_tracks
 has_ppmck_track_headers = sg.has_ppmck_track_headers
@@ -55,6 +60,17 @@ PPMCK_CHANNEL_MAP = sg.PPMCK_CHANNEL_MAP
 play_audio = sg.play_audio
 synthesize_note = sg.synthesize_note
 synthesize_sequence = sg.synthesize_sequence
+__version__ = sg.__version__
+
+
+class SfxGeneratorVersionTests(unittest.TestCase):
+    def test_version_matches_rulesync_metadata(self) -> None:
+        meta_path = ROOT / ".rulesync" / "metadata" / "sfx-generator.json"
+        metadata = json.loads(meta_path.read_text(encoding="utf-8"))
+        self.assertEqual(__version__, metadata["version"])
+        header = CANONICAL_PATH.read_text(encoding="utf-8").splitlines()[1]
+        self.assertIn(metadata["version"], header)
+        self.assertIn("Version:", header)
 
 
 class PitchTests(unittest.TestCase):
@@ -630,8 +646,8 @@ class MmlPhase3CompatTests(unittest.TestCase):
         config = build_config_from_args(args)
         specs = resolve_track_specs(args, config)
         self.assertEqual(len(specs), 5)
-        self.assertEqual(specs[-1][0][0].waveform, "sine")
-        self.assertEqual(specs[0][0][0].waveform, "square")
+        self.assertEqual(specs[-1][1].waveform, "sine")
+        self.assertEqual(specs[0][1].waveform, "square")
 
     def test_ppmck_phase3_sample_score(self) -> None:
         tracks = parse_mml_source(
@@ -663,6 +679,200 @@ class MmlPhase3CompatTests(unittest.TestCase):
             self.assertTrue(wav_path.exists())
             _, audio = wavfile.read(wav_path)
             self.assertGreater(audio.size, 0)
+
+
+class MmlPyxelCompatTests(unittest.TestCase):
+    def test_q_gate_percent_inserts_rest(self) -> None:
+        events = parse_pyxel_mml("T120 Q50 @1 O4 L8 C4")
+        quarter = 60.0 / 120
+        self.assertEqual(len(events), 2)
+        self.assertAlmostEqual(events[0].duration, quarter / 2)
+        self.assertIsNone(events[1].frequency)
+
+    def test_volume_maps_0_to_127(self) -> None:
+        events = parse_pyxel_mml("T120 Q100 V127 @1 O4 L8 C4")
+        self.assertAlmostEqual(events[0].volume, 1.0)
+        quiet = parse_pyxel_mml("T120 Q100 V0 @1 O4 L8 C4")
+        self.assertAlmostEqual(quiet[0].volume, 0.0)
+
+    def test_tone_map_assigns_waveforms(self) -> None:
+        self.assertEqual(PYXEL_TONE_MAP[0]["waveform"], "triangle")
+        self.assertEqual(PYXEL_TONE_MAP[3]["waveform"], "noise")
+        events = parse_pyxel_mml("T120 Q100 @2 O4 L8 C4")
+        self.assertEqual(events[0].waveform, "square")
+        self.assertAlmostEqual(events[0].duty, 0.25)
+
+    def test_legato_connects_different_pitches(self) -> None:
+        events = parse_pyxel_mml("T120 Q50 @1 O4 L8 C4&D4")
+        quarter = 60.0 / 120
+        pitched = [event for event in events if event.frequency is not None]
+        self.assertEqual(len(pitched), 2)
+        self.assertAlmostEqual(pitched[0].duration, quarter)
+
+    def test_tie_combines_same_pitch(self) -> None:
+        events = parse_pyxel_mml("T120 Q100 @1 O4 L8 C4&C")
+        quarter = 60.0 / 120
+        pitched = [event for event in events if event.frequency is not None]
+        self.assertEqual(len(pitched), 1)
+        self.assertAlmostEqual(pitched[0].duration, quarter * 1.5)
+
+    def test_implicit_repeat_uses_max_repeat(self) -> None:
+        events = parse_pyxel_mml("T120 @1 O4 L8 [C4 D4]", max_repeat=3)
+        pitched = [event for event in events if event.frequency is not None]
+        self.assertEqual(len(pitched), 6)
+
+    def test_explicit_repeat_ignores_max_repeat(self) -> None:
+        events = parse_pyxel_mml("T120 @1 O4 L8 [C4 D4]2", max_repeat=5)
+        pitched = [event for event in events if event.frequency is not None]
+        self.assertEqual(len(pitched), 4)
+
+    def test_repeat_reexecutes_state_commands(self) -> None:
+        events = parse_pyxel_mml("T120 Q100 O4 [>C4]2 C4")
+        frequencies = [event.frequency for event in events if event.frequency is not None]
+        self.assertEqual(
+            frequencies,
+            [
+                note_name_to_freq("C", 5),
+                note_name_to_freq("C", 6),
+                note_name_to_freq("C", 6),
+            ],
+        )
+
+    def test_repeat_events_do_not_share_tie_mutations(self) -> None:
+        events = parse_pyxel_mml("T120 Q100 O4 [C4]2 &C4")
+        pitched = [event for event in events if event.frequency is not None]
+        self.assertEqual(len(pitched), 2)
+        self.assertIsNot(pitched[0], pitched[1])
+        self.assertAlmostEqual(pitched[0].duration, 0.5)
+        self.assertAlmostEqual(pitched[1].duration, 1.0)
+
+    def test_max_repeat_zero_raises(self) -> None:
+        with self.assertRaises(ValueError):
+            parse_pyxel_mml("[C4]", max_repeat=0)
+
+    def test_env_and_vib_macros_parse(self) -> None:
+        events = parse_pyxel_mml(
+            "T128 Q100 @2 @ENV1{127,6,96} @VIB1{36,18,25} O4 L8 C4"
+        )
+        pitched = [event for event in events if event.frequency is not None]
+        self.assertEqual(len(pitched), 1)
+        self.assertIsNotNone(pitched[0].event_adsr)
+        self.assertIsNotNone(pitched[0].lfo_depth)
+        self.assertIsNotNone(pitched[0].lfo_rate)
+
+    def test_effect_slots_can_be_disabled_and_reselected(self) -> None:
+        events = parse_pyxel_mml(
+            "T120 Q100 "
+            "@ENV1{127,6,96} @VIB1{0,12,100} @GLI1{100,12} C4 "
+            "@ENV0 @VIB0 @GLI0 D4 "
+            "@ENV1 @VIB1 @GLI1 E4"
+        )
+        pitched = [event for event in events if event.frequency is not None]
+        self.assertIsNotNone(pitched[0].event_adsr)
+        self.assertIsNotNone(pitched[0].lfo_depth)
+        self.assertEqual(pitched[0].glide_cents, 100.0)
+        self.assertIsNone(pitched[1].event_adsr)
+        self.assertIsNone(pitched[1].lfo_depth)
+        self.assertIsNone(pitched[1].glide_cents)
+        self.assertIs(pitched[2].event_adsr, pitched[0].event_adsr)
+        self.assertEqual(pitched[2].lfo_depth, pitched[0].lfo_depth)
+        self.assertEqual(pitched[2].glide_cents, pitched[0].glide_cents)
+
+    def test_ppmck_token_rejected_in_pyxel_mode(self) -> None:
+        with self.assertRaises(ValueError):
+            parse_pyxel_mml("T120 N32")
+
+    def test_compat_report_lists_ppmck_tokens(self) -> None:
+        issues = report_pyxel_compat_issues("T120 %12 *4 W(kick.wav) N32")
+        self.assertTrue(any("N32" in issue or "直接ノート" in issue for issue in issues))
+        self.assertTrue(any("%" in issue for issue in issues))
+
+    def test_pyxel_core_sample_score(self) -> None:
+        events = parse_pyxel_mml(
+            (ROOT / "scores" / "pyxel_core_sample.mml").read_text(encoding="utf-8")
+        )
+        pitched = [event for event in events if event.frequency is not None]
+        self.assertEqual(len(pitched), 4)
+        self.assertAlmostEqual(pitched[0].frequency, note_name_to_freq("C", 5))
+
+    def test_cli_max_repeat_zero_exits_with_error(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            output = str(Path(tmpdir) / "bad_repeat")
+            result = main(
+                [
+                    "--mml-dialect",
+                    "pyxel",
+                    "--max-repeat",
+                    "0",
+                    "--input",
+                    "C4",
+                    "-o",
+                    output,
+                ]
+            )
+            self.assertEqual(result, 1)
+
+    def test_cli_pyxel_dialect_generates_wav(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            output = str(Path(tmpdir) / "pyxel_cli")
+            result = main(
+                [
+                    "--mml-dialect",
+                    "pyxel",
+                    "--input-file",
+                    str(ROOT / "scores" / "pyxel_core_sample.mml"),
+                    "-o",
+                    output,
+                ]
+            )
+            self.assertEqual(result, 0)
+            self.assertTrue(Path(f"{output}.wav").exists())
+
+    def test_detune_y_shifts_frequency(self) -> None:
+        base = parse_pyxel_mml("T120 Q100 @1 O4 L8 C4")[0].frequency
+        detuned = parse_pyxel_mml("T120 Q100 Y50 @1 O4 L8 C4")[0].frequency
+        self.assertIsNotNone(base)
+        self.assertIsNotNone(detuned)
+        self.assertAlmostEqual(detuned, base * (2.0 ** (50 / 1200.0)))
+
+    def test_sharp_note_matches_plus(self) -> None:
+        sharp = parse_pyxel_mml("T120 Q100 @1 O4 L8 C#4")[0].frequency
+        plus = parse_pyxel_mml("T120 Q100 @1 O4 L8 C+4")[0].frequency
+        self.assertAlmostEqual(sharp, plus)
+        self.assertAlmostEqual(sharp, note_name_to_freq("C#", 4))
+
+    def test_l12_sets_triplet_quarter_length(self) -> None:
+        events = parse_pyxel_mml("T120 Q100 @1 O4 L12 C")
+        quarter = 60.0 / 120
+        self.assertAlmostEqual(events[0].duration, quarter / 3)
+
+    def test_gli_macro_adds_pitch_envelope(self) -> None:
+        base_event = parse_pyxel_mml("T120 Q100 @1 O4 L8 C4")[0]
+        gli = parse_pyxel_mml("T120 Q100 @1 @GLI1{100,6} O4 L8 C4")[0]
+        self.assertIsNotNone(base_event.frequency)
+        self.assertAlmostEqual(gli.frequency, base_event.frequency)
+        self.assertEqual(gli.glide_cents, 100.0)
+        self.assertAlmostEqual(gli.glide_duration, (60.0 / 120) * (6 / 48))
+        config = SynthConfig(waveform="sine")
+        self.assertFalse(
+            np.allclose(synthesize_note(gli, config), synthesize_note(base_event, config))
+        )
+
+    def test_pyxel_effects_sample_score(self) -> None:
+        events = parse_pyxel_mml(
+            (ROOT / "scores" / "pyxel_effects_sample.mml").read_text(encoding="utf-8")
+        )
+        pitched = [event for event in events if event.frequency is not None]
+        self.assertGreaterEqual(len(pitched), 4)
+        self.assertIsNotNone(pitched[0].event_adsr)
+        self.assertIsNotNone(pitched[0].lfo_depth)
+
+    def test_pyxel_legato_sample_score(self) -> None:
+        events = parse_pyxel_mml(
+            (ROOT / "scores" / "pyxel_legato_sample.mml").read_text(encoding="utf-8")
+        )
+        pitched = [event for event in events if event.frequency is not None]
+        self.assertGreaterEqual(len(pitched), 3)
 
 
 if __name__ == "__main__":

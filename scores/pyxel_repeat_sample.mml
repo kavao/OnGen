@@ -1,0 +1,4 @@
+; Repeat: implicit ] uses --max-repeat; explicit ]3 is fixed
+T120 @1 O4 L8
+[ C4 D4 E4 ]3
+[ G4 A4 ] 

@@ -16,6 +16,7 @@ description: "OnGenプロジェクト固有の目的・正本・検証ルール"
 ## Sources of truth
 
 - 音源生成実装: `tools/sound/sfx_generator.py`
+- 音源生成ツールのバージョン正本: `.rulesync/metadata/sfx-generator.json`（`tools/sound/sfx_generator.py` 行頭コメントの `Version:` と `__version__` はこれと一致させる）
 - 人間向け操作説明: `docs/audio/`（入口は `docs/README.md`、短い代表例は `README.md`）
 - MML仕様（人間向け）: `docs/audio/mml-reference.md`
 - 外部スキル取り込み（人間向け）: `docs/skills/importing-external-skills.md`
@@ -30,6 +31,7 @@ description: "OnGenプロジェクト固有の目的・正本・検証ルール"
 - 楽曲スコアの変更時は、音程・音価を固定する回帰テストを追加または更新する。
 - 出力確認用音声は `output/` に生成し、正本として扱わない。
 - `tools/sound/sfx_generator.py` の単体可搬性を壊すプロジェクト内モジュール依存を追加しない。
+- `tools/sound/sfx_generator.py` の仕様変更時は `.rulesync/metadata/sfx-generator.json` の `version` を更新し、ファイル行頭コメントと `__version__` を同期する。
 
 ## MML compatibility
 

@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# Version: 0.4.0 (正本: .rulesync/metadata/sfx-generator.json)
 """OnGen: NumPy/SciPy ベースのMML・ABC音源合成ツール。"""
 
 from __future__ import annotations
@@ -17,6 +18,8 @@ from typing import Iterable, Sequence
 import numpy as np
 from scipy.io import wavfile
 from scipy.signal import butter, sosfilt
+
+__version__ = "0.4.0"
 
 SAMPLE_RATE = 44100
 BIT_DEPTH = 16
@@ -143,7 +146,11 @@ class NoteEvent:
     fm_index: float | None = None
     fm_ratio: float | None = None
     lfo_depth: float | None = None
+    lfo_rate: float | None = None
     lfo_target: str | None = None
+    event_adsr: ADSR | None = None
+    glide_cents: float | None = None
+    glide_duration: float | None = None
 
 
 def midi_to_freq(midi: int) -> float:
@@ -326,6 +333,7 @@ def synthesize_oscillator(
         mod_waveform=config.fm.mod_waveform,
     )
     lfo_depth = event.lfo_depth if event.lfo_depth is not None else config.lfo.depth
+    lfo_rate = event.lfo_rate if event.lfo_rate is not None else config.lfo.rate
     lfo_target = event.lfo_target or config.lfo.target
     lfo_enabled = config.lfo.enabled or event.lfo_depth is not None
 
@@ -335,8 +343,19 @@ def synthesize_oscillator(
     t = np.arange(num_samples, dtype=np.float64) / SAMPLE_RATE
     carrier_freq = np.full(num_samples, frequency, dtype=np.float64)
 
+    if event.glide_cents is not None and event.glide_duration is not None:
+        glide_samples = min(max(int(event.glide_duration * SAMPLE_RATE), 1), num_samples)
+        glide_cents = np.zeros(num_samples, dtype=np.float64)
+        glide_cents[:glide_samples] = np.linspace(
+            event.glide_cents,
+            0.0,
+            glide_samples,
+            endpoint=True,
+        )
+        carrier_freq *= 2.0 ** (glide_cents / 1200.0)
+
     if lfo_enabled and lfo_depth > 0 and lfo_target == "pitch":
-        lfo = generate_lfo_signal(num_samples, config.lfo.rate, config.lfo.waveform)
+        lfo = generate_lfo_signal(num_samples, lfo_rate, config.lfo.waveform)
         carrier_freq += frequency * lfo_depth * lfo
 
     if fm.enabled and fm.mod_index > 0:
@@ -350,7 +369,7 @@ def synthesize_oscillator(
     if waveform == "square":
         duty_values: float | np.ndarray = duty
         if lfo_enabled and lfo_depth > 0 and lfo_target == "duty":
-            lfo = generate_lfo_signal(num_samples, config.lfo.rate, config.lfo.waveform)
+            lfo = generate_lfo_signal(num_samples, lfo_rate, config.lfo.waveform)
             duty_values = np.clip(duty + lfo_depth * lfo * 0.4, 0.05, 0.95)
 
         if config.anti_alias:
@@ -364,7 +383,7 @@ def synthesize_oscillator(
         wave = waveform_from_phase(waveform, phase, duty)
 
     if lfo_enabled and lfo_depth > 0:
-        lfo = generate_lfo_signal(num_samples, config.lfo.rate, config.lfo.waveform)
+        lfo = generate_lfo_signal(num_samples, lfo_rate, config.lfo.waveform)
         if lfo_target == "volume":
             wave *= 1.0 - lfo_depth + lfo_depth * (0.5 + 0.5 * lfo)
 
@@ -471,7 +490,7 @@ def synthesize_note(event: NoteEvent, config: SynthConfig) -> np.ndarray:
 
     wave = synthesize_oscillator(waveform, num_samples, event.frequency, duty, config, event)
     wave = apply_audio_filter(wave, config.filter_type, config.cutoff)
-    env = config.adsr.envelope(num_samples)
+    env = (event.event_adsr or config.adsr).envelope(num_samples)
     return wave * env * volume
 
 
@@ -962,8 +981,23 @@ def apply_synth_overrides(config: SynthConfig, overrides: dict[str, object]) -> 
     return replace(config, **kwargs) if kwargs else config
 
 
-def parse_mml_source(text: str, default_config: SynthConfig | None = None) -> list[ParsedMMLTrack]:
+def parse_mml_source(
+    text: str,
+    default_config: SynthConfig | None = None,
+    *,
+    dialect: str = "ppmck",
+    max_repeat: int = 2,
+) -> list[ParsedMMLTrack]:
     default_config = default_config or SynthConfig()
+    if dialect.lower() == "pyxel":
+        return [
+            ParsedMMLTrack(
+                channel="",
+                events=parse_pyxel_mml(text, default_config, max_repeat=max_repeat),
+                synth_overrides={},
+            )
+        ]
+
     split = split_ppmck_tracks(text)
     if split is None:
         return [
@@ -1306,6 +1340,567 @@ def parse_mml(
             )
 
     return events
+
+
+# ---------------------------------------------------------------------------
+# Pyxel MML parser (2.4+ dialect)
+# ---------------------------------------------------------------------------
+
+PYXEL_TEMPO_MIN = 1
+PYXEL_TEMPO_MAX = 900
+PYXEL_OCTAVE_MIN = -1
+PYXEL_OCTAVE_MAX = 9
+PYXEL_LENGTH_MIN = 1
+PYXEL_LENGTH_MAX = 192
+PYXEL_VOLUME_MAX = 127
+PYXEL_GATE_MAX = 100
+PYXEL_TICKS_PER_QUARTER = 48
+PYXEL_DEFAULT_MAX_REPEAT = 2
+
+PYXEL_TONE_MAP: dict[int, dict[str, object]] = {
+    0: {"waveform": "triangle"},
+    1: {"waveform": "square", "duty": 0.5},
+    2: {"waveform": "square", "duty": 0.25},
+    3: {"waveform": "noise", "noise_color": "white"},
+}
+
+PYXEL_MML_TOKEN_RE = re.compile(
+    r"""
+    (?P<loop_start>\[) |
+    (?P<loop_end>\]) |
+    (?P<octave_up>>) |
+    (?P<octave_down><) |
+    (?P<tie_ext>&\d+) |
+    (?P<tie>&) |
+    (?P<env_macro>@ENV\d*\{[^}]*\}) |
+    (?P<env_slot>@ENV\d+) |
+    (?P<vib_macro>@VIB\d*\{[^}]*\}) |
+    (?P<vib_slot>@VIB\d+) |
+    (?P<gli_macro>@GLI(?:\d+|\*)\{[^}]*\}) |
+    (?P<gli_slot>@GLI(?:\d+|\*)) |
+    (?P<gate>Q\d+) |
+    (?P<detune>Y[+-]?\d+) |
+    (?P<transpose>K[+-]?\d+) |
+    (?P<cmd>[OTLV][+-]?\d*) |
+    (?P<tone>@[0-3]) |
+    (?P<rest>R(?:\d+)?) |
+    (?P<note>[A-G][+#-]?\d*\.*)
+    """,
+    re.VERBOSE | re.IGNORECASE,
+)
+
+PYXEL_UNSUPPORTED_PATTERNS: tuple[tuple[str, str], ...] = (
+    (r"%\d+", "OnGen 独自の % コマンド"),
+    (r"\*\d+", "OnGen 独自の * コマンド"),
+    (r"W\(", "OnGen 独自の W(...) サンプル"),
+    (r"N\d+", "PPMCK 流の直接ノート番号 N"),
+    (r"#GATE-DENOM", "PPMCK の #GATE-DENOM"),
+    (r"@Q\d+", "PPMCK の @Q フレーム短縮"),
+    (r"(?<![A-Z])Q\d+,\d+", "PPMCK の Q<num>,<frames> 形式"),
+)
+
+
+@dataclass
+class PyxelMMLState:
+    octave: int = 4
+    length: int = 4
+    tempo: int = 120
+    volume: int = 100
+    gate_percent: int = 80
+    transpose: int = 0
+    detune_cents: int = 0
+    waveform: str | None = "triangle"
+    duty: float | None = None
+    noise_color: str = "white"
+    env_adsr: ADSR | None = None
+    vib_rate: float | None = None
+    vib_depth: float | None = None
+    gli_cents: float | None = None
+    gli_duration: float | None = None
+
+
+def preprocess_pyxel_mml_text(text: str) -> str:
+    cleaned_lines: list[str] = []
+    for raw_line in text.splitlines():
+        line = raw_line.split(";", 1)[0].strip()
+        if line:
+            cleaned_lines.append(line)
+    return " ".join(cleaned_lines)
+
+
+def pyxel_tick_to_seconds(ticks: int, tempo: int) -> float:
+    quarter = 60.0 / max(tempo, 1)
+    return quarter * (ticks / PYXEL_TICKS_PER_QUARTER)
+
+
+def pyxel_length_to_seconds(length: int, dotted: int, tempo: int) -> float:
+    return mml_length_to_seconds(length, dotted, tempo)
+
+
+def pyxel_volume_to_gain(volume: int) -> float:
+    return min(max(volume, 0), PYXEL_VOLUME_MAX) / PYXEL_VOLUME_MAX
+
+
+def pyxel_apply_gate(full_duration: float, gate_percent: int) -> tuple[float, float]:
+    ratio = min(max(gate_percent, 0), PYXEL_GATE_MAX) / 100.0
+    sound = full_duration * ratio
+    rest = max(0.0, full_duration - sound)
+    return sound, rest
+
+
+def pyxel_freq_from_name(name: str, octave: int, transpose: int, detune_cents: int) -> float:
+    freq = mml_freq_from_name(name, octave, transpose)
+    if detune_cents:
+        freq *= 2.0 ** (detune_cents / 1200.0)
+    return freq
+
+
+def apply_pyxel_tone(state: PyxelMMLState, tone: int) -> None:
+    if tone not in PYXEL_TONE_MAP:
+        raise ValueError(f"Pyxel音色の範囲外です: @{tone}")
+    defaults = PYXEL_TONE_MAP[tone]
+    state.waveform = str(defaults["waveform"])
+    state.duty = float(defaults["duty"]) if "duty" in defaults else None
+    state.noise_color = str(defaults.get("noise_color", "white"))
+
+
+def pyxel_parse_macro_numbers(body: str) -> list[float]:
+    values: list[float] = []
+    for token in body.split(","):
+        token = token.strip()
+        if not token:
+            continue
+        if token == "*":
+            values.append(float("nan"))
+        else:
+            values.append(float(token))
+    return values
+
+
+def pyxel_env_from_macro(values: list[float], tempo: int) -> ADSR:
+    if not values:
+        raise ValueError("Pyxel @ENV マクロの引数が空です")
+    init_vol = min(max(values[0], 0.0), PYXEL_VOLUME_MAX) / PYXEL_VOLUME_MAX
+    decay = 0.05
+    sustain = init_vol
+    if len(values) >= 3:
+        decay = pyxel_tick_to_seconds(int(values[1]), tempo)
+        sustain = min(max(values[2], 0.0), PYXEL_VOLUME_MAX) / PYXEL_VOLUME_MAX
+    return ADSR(attack=0.002, decay=max(decay, 0.001), sustain=sustain, release=0.04)
+
+
+def pyxel_vib_from_macro(values: list[float], tempo: int) -> tuple[float, float]:
+    if len(values) < 3:
+        raise ValueError("Pyxel @VIB マクロには delay, period, depth が必要です")
+    period_ticks = int(values[1])
+    depth_cents = float(values[2])
+    period_sec = max(pyxel_tick_to_seconds(max(period_ticks, 1), tempo), 0.01)
+    rate = 1.0 / period_sec
+    depth = min(abs(depth_cents) / 1200.0, 0.12)
+    return rate, depth
+
+
+def pyxel_gli_from_macro(values: list[float], tempo: int) -> tuple[float, float]:
+    if len(values) < 2:
+        raise ValueError("Pyxel @GLI マクロには offset, duration が必要です")
+    if math.isnan(values[0]):
+        cents = 0.0
+    else:
+        cents = float(values[0])
+    if math.isnan(values[1]):
+        duration = 0.0
+    else:
+        duration = pyxel_tick_to_seconds(max(int(values[1]), 0), tempo)
+    return cents, duration
+
+
+def make_pyxel_note_event(
+    *,
+    state: PyxelMMLState,
+    default_config: SynthConfig,
+    duration: float,
+    frequency: float | None,
+) -> NoteEvent:
+    return NoteEvent(
+        frequency=frequency,
+        duration=duration,
+        volume=pyxel_volume_to_gain(state.volume),
+        waveform=state.waveform or default_config.waveform,
+        duty=state.duty,
+        lfo_depth=state.vib_depth,
+        lfo_rate=state.vib_rate,
+        lfo_target="pitch" if state.vib_depth else None,
+        event_adsr=state.env_adsr,
+        glide_cents=state.gli_cents,
+        glide_duration=state.gli_duration,
+    )
+
+
+def expand_pyxel_repeats(text: str, max_repeat: int) -> str:
+    def expand_section(start: int, *, nested: bool) -> tuple[str, int]:
+        parts: list[str] = []
+        pos = start
+        while pos < len(text):
+            char = text[pos]
+            if char == "[":
+                expanded, pos = expand_section(pos + 1, nested=True)
+                count_match = re.match(r"\d+", text[pos:])
+                if count_match:
+                    repeat = int(count_match.group(0))
+                    if repeat < 1:
+                        raise ValueError("Pyxelのリピート回数は1以上を指定してください")
+                    pos += count_match.end()
+                else:
+                    repeat = max_repeat
+                parts.append(expanded * repeat)
+                continue
+            if char == "]":
+                if not nested:
+                    raise ValueError("Pyxelのリピート終端 ] に対応する [ がありません")
+                return "".join(parts), pos + 1
+            parts.append(char)
+            pos += 1
+        if nested:
+            raise ValueError("Pyxelのリピート開始 [ が閉じられていません")
+        return "".join(parts), pos
+
+    expanded, _ = expand_section(0, nested=False)
+    return expanded
+
+
+def report_pyxel_compat_issues(text: str) -> list[str]:
+    compact = re.sub(r"\s+", "", preprocess_pyxel_mml_text(text).upper())
+    issues: list[str] = []
+    for pattern, message in PYXEL_UNSUPPORTED_PATTERNS:
+        if re.search(pattern, compact, re.IGNORECASE):
+            issues.append(message)
+    if split_ppmck_tracks(text):
+        issues.append("PPMCK 流の A〜E トラック宣言（Pyxel は Sound 単位の MML）")
+    return issues
+
+
+def parse_pyxel_mml(
+    text: str,
+    default_config: SynthConfig | None = None,
+    *,
+    max_repeat: int = PYXEL_DEFAULT_MAX_REPEAT,
+) -> list[NoteEvent]:
+    if max_repeat < 1:
+        raise ValueError("--max-repeat は正の整数を指定してください")
+
+    default_config = default_config or SynthConfig()
+    state = PyxelMMLState()
+    events: list[NoteEvent] = []
+    env_slots: dict[int, ADSR] = {}
+    vib_slots: dict[int, tuple[float, float]] = {}
+    gli_slots: dict[int, tuple[float, float]] = {}
+
+    compact = re.sub(r"\s+", "", preprocess_pyxel_mml_text(text).upper())
+    compact = expand_pyxel_repeats(compact, max_repeat)
+
+    tie_pending = False
+    tie_extra_duration = 0.0
+    legato_pending = False
+    last_pitched_event: NoteEvent | None = None
+    last_gate_rest: NoteEvent | None = None
+    last_pitched_full_duration = 0.0
+    last_pitched_frequency: float | None = None
+
+    def emit_rest(full_duration: float) -> None:
+        nonlocal tie_pending, tie_extra_duration, legato_pending
+        tie_pending = False
+        tie_extra_duration = 0.0
+        legato_pending = False
+        events.append(
+            make_pyxel_note_event(
+                state=state,
+                default_config=default_config,
+                duration=full_duration,
+                frequency=None,
+            )
+        )
+
+    def emit_pitched(full_duration: float, frequency: float) -> None:
+        nonlocal tie_pending, tie_extra_duration, legato_pending
+        nonlocal last_pitched_event, last_gate_rest, last_pitched_full_duration
+        nonlocal last_pitched_frequency
+
+        effective_duration = full_duration + tie_extra_duration
+        tie_extra_duration = 0.0
+
+        if tie_pending and last_pitched_event is not None:
+            if math.isclose(last_pitched_frequency or 0.0, frequency, rel_tol=0.0, abs_tol=1e-6):
+                if last_gate_rest is not None and events and events[-1] is last_gate_rest:
+                    events.pop()
+                combined_duration = last_pitched_full_duration + effective_duration
+                sound, rest = pyxel_apply_gate(combined_duration, state.gate_percent)
+                last_pitched_event.duration = sound
+                last_pitched_full_duration = combined_duration
+                last_gate_rest = None
+                if rest > 0:
+                    last_gate_rest = make_pyxel_note_event(
+                        state=state,
+                        default_config=default_config,
+                        duration=rest,
+                        frequency=None,
+                    )
+                    events.append(last_gate_rest)
+            else:
+                if last_gate_rest is not None and events and events[-1] is last_gate_rest:
+                    events.pop()
+                if last_pitched_event is not None:
+                    last_pitched_event.duration = last_pitched_full_duration
+                    last_gate_rest = None
+                sound, rest = pyxel_apply_gate(effective_duration, state.gate_percent)
+                if sound > 0:
+                    pitched_event = make_pyxel_note_event(
+                        state=state,
+                        default_config=default_config,
+                        duration=sound,
+                        frequency=frequency,
+                    )
+                    events.append(pitched_event)
+                    last_pitched_event = pitched_event
+                else:
+                    last_pitched_event = None
+                last_pitched_full_duration = effective_duration
+                if rest > 0:
+                    last_gate_rest = make_pyxel_note_event(
+                        state=state,
+                        default_config=default_config,
+                        duration=rest,
+                        frequency=None,
+                    )
+                    events.append(last_gate_rest)
+                last_pitched_frequency = frequency
+            tie_pending = False
+            legato_pending = False
+            return
+
+        if tie_pending:
+            raise ValueError("Pyxelの & の後に音符または休符が必要です")
+
+        sound, rest = pyxel_apply_gate(effective_duration, state.gate_percent)
+        pitched_event = make_pyxel_note_event(
+            state=state,
+            default_config=default_config,
+            duration=sound,
+            frequency=frequency,
+        )
+        if sound > 0:
+            events.append(pitched_event)
+        last_pitched_event = pitched_event if sound > 0 else None
+        last_pitched_full_duration = effective_duration
+        last_pitched_frequency = frequency
+        last_gate_rest = None
+        if rest > 0:
+            last_gate_rest = make_pyxel_note_event(
+                state=state,
+                default_config=default_config,
+                duration=rest,
+                frequency=None,
+            )
+            events.append(last_gate_rest)
+        tie_pending = False
+        legato_pending = False
+
+    pos = 0
+    while pos < len(compact):
+        match = PYXEL_MML_TOKEN_RE.match(compact, pos)
+        if not match:
+            raise ValueError(
+                f"未対応のPyxel MMLトークンです: {compact[pos:pos + 12]!r} (位置 {pos})"
+            )
+        pos = match.end()
+
+        if match.group("tie_ext"):
+            length = int(match.group("tie_ext")[1:])
+            tie_extra_duration += pyxel_length_to_seconds(length, 0, state.tempo)
+            tie_pending = True
+            continue
+
+        if match.group("tie"):
+            tie_pending = True
+            continue
+
+        if match.group("env_macro"):
+            token = match.group("env_macro").upper()
+            body_match = re.search(r"\{([^}]*)\}", token)
+            if not body_match:
+                continue
+            slot_match = re.match(r"@ENV(\d+)", token)
+            slot = int(slot_match.group(1)) if slot_match else 0
+            if slot < 1:
+                raise ValueError("Pyxel @ENV マクロのスロットは1以上を指定してください")
+            state.env_adsr = pyxel_env_from_macro(
+                pyxel_parse_macro_numbers(body_match.group(1)),
+                state.tempo,
+            )
+            env_slots[slot] = state.env_adsr
+            continue
+
+        if match.group("env_slot"):
+            slot = int(match.group("env_slot")[4:] or "0")
+            if slot == 0:
+                state.env_adsr = None
+            elif slot in env_slots:
+                state.env_adsr = env_slots[slot]
+            else:
+                raise ValueError(f"未定義のPyxel @ENVスロットです: {slot}")
+            continue
+
+        if match.group("vib_macro"):
+            token = match.group("vib_macro").upper()
+            body_match = re.search(r"\{([^}]*)\}", token)
+            if not body_match:
+                continue
+            slot_match = re.match(r"@VIB(\d+)", token)
+            slot = int(slot_match.group(1)) if slot_match else 0
+            if slot < 1:
+                raise ValueError("Pyxel @VIB マクロのスロットは1以上を指定してください")
+            rate, depth = pyxel_vib_from_macro(
+                pyxel_parse_macro_numbers(body_match.group(1)),
+                state.tempo,
+            )
+            state.vib_rate = rate
+            state.vib_depth = depth
+            vib_slots[slot] = (rate, depth)
+            continue
+
+        if match.group("vib_slot"):
+            slot = int(match.group("vib_slot")[4:] or "0")
+            if slot == 0:
+                state.vib_rate = None
+                state.vib_depth = None
+            elif slot in vib_slots:
+                state.vib_rate, state.vib_depth = vib_slots[slot]
+            else:
+                raise ValueError(f"未定義のPyxel @VIBスロットです: {slot}")
+            continue
+
+        if match.group("gli_macro"):
+            token = match.group("gli_macro").upper()
+            body_match = re.search(r"\{([^}]*)\}", token)
+            if not body_match:
+                continue
+            slot_match = re.match(r"@GLI(\d+)", token)
+            slot = int(slot_match.group(1)) if slot_match else 0
+            if slot < 1:
+                raise ValueError("Pyxel @GLI マクロのスロットは1以上を指定してください")
+            state.gli_cents, state.gli_duration = pyxel_gli_from_macro(
+                pyxel_parse_macro_numbers(body_match.group(1)),
+                state.tempo,
+            )
+            gli_slots[slot] = (state.gli_cents, state.gli_duration)
+            continue
+
+        if match.group("gli_slot"):
+            slot_text = match.group("gli_slot")[4:]
+            if slot_text in ("", "0", "*"):
+                state.gli_cents = None
+                state.gli_duration = None
+            else:
+                slot = int(slot_text)
+                if slot not in gli_slots:
+                    raise ValueError(f"未定義のPyxel @GLIスロットです: {slot}")
+                state.gli_cents, state.gli_duration = gli_slots[slot]
+            continue
+
+        if match.group("gate"):
+            gate_percent = int(match.group("gate")[1:])
+            if not 0 <= gate_percent <= PYXEL_GATE_MAX:
+                raise ValueError(f"Pyxel Q値の範囲外です: Q{gate_percent}")
+            state.gate_percent = gate_percent
+            continue
+
+        if match.group("detune"):
+            cents = int(match.group("detune")[1:])
+            state.detune_cents = cents
+            continue
+
+        if match.group("transpose"):
+            state.transpose = int(match.group("transpose")[1:])
+            continue
+
+        if match.group("cmd"):
+            cmd = match.group("cmd")
+            kind = cmd[0]
+            value = cmd[1:]
+            if not value:
+                continue
+            number = int(value)
+            if kind == "O":
+                if not PYXEL_OCTAVE_MIN <= number <= PYXEL_OCTAVE_MAX:
+                    raise ValueError(f"Pyxel O値の範囲外です: O{number}")
+                state.octave = number
+            elif kind == "L":
+                if not PYXEL_LENGTH_MIN <= number <= PYXEL_LENGTH_MAX:
+                    raise ValueError(f"Pyxel L値の範囲外です: L{number}")
+                state.length = number
+            elif kind == "T":
+                if not PYXEL_TEMPO_MIN <= number <= PYXEL_TEMPO_MAX:
+                    raise ValueError(f"Pyxel T値の範囲外です: T{number}")
+                state.tempo = number
+            elif kind == "V":
+                if not 0 <= number <= PYXEL_VOLUME_MAX:
+                    raise ValueError(f"Pyxel V値の範囲外です: V{number}")
+                state.volume = number
+            continue
+
+        if match.group("tone"):
+            apply_pyxel_tone(state, int(match.group("tone")[1:]))
+            continue
+
+        if match.group("octave_up"):
+            state.octave = min(state.octave + 1, PYXEL_OCTAVE_MAX)
+            continue
+
+        if match.group("octave_down"):
+            state.octave = max(state.octave - 1, PYXEL_OCTAVE_MIN)
+            continue
+
+        if match.group("rest"):
+            token = match.group("rest")
+            length = state.length
+            length_match = re.fullmatch(r"R(\d+)", token, re.IGNORECASE)
+            if length_match:
+                length = int(length_match.group(1))
+            full_duration = pyxel_length_to_seconds(length, 0, state.tempo)
+            emit_rest(full_duration)
+            continue
+
+        if match.group("note"):
+            token = match.group("note")
+            note_match = re.match(r"([A-G](?:\+|#|-)?)(\d*)(\.*)", token, re.IGNORECASE)
+            if not note_match:
+                continue
+            name = note_match.group(1)
+            length_text = note_match.group(2)
+            dots = note_match.group(3) or ""
+            length = int(length_text) if length_text else state.length
+            full_duration = pyxel_length_to_seconds(length, len(dots), state.tempo)
+            emit_pitched(
+                full_duration,
+                pyxel_freq_from_name(name, state.octave, state.transpose, state.detune_cents),
+            )
+
+    return events
+
+
+def parse_mml_by_dialect(
+    text: str,
+    default_config: SynthConfig | None = None,
+    *,
+    dialect: str = "ppmck",
+    max_repeat: int = PYXEL_DEFAULT_MAX_REPEAT,
+    channel: str | None = None,
+) -> list[NoteEvent]:
+    normalized = dialect.lower()
+    if normalized == "pyxel":
+        return parse_pyxel_mml(text, default_config, max_repeat=max_repeat)
+    if normalized == "ppmck":
+        return parse_mml(text, default_config, channel=channel)
+    raise ValueError(f"未対応の MML 方言です: {dialect}")
 
 
 # ---------------------------------------------------------------------------
@@ -1759,8 +2354,20 @@ def resolve_events(args: argparse.Namespace, config: SynthConfig) -> list[NoteEv
     if fmt == "abc":
         return parse_abc(text, config)
     if fmt == "mml":
-        return parse_mml(text, config)
+        return parse_mml_by_dialect(
+            text,
+            config,
+            dialect=getattr(args, "mml_dialect", "ppmck"),
+            max_repeat=getattr(args, "max_repeat", PYXEL_DEFAULT_MAX_REPEAT),
+        )
     raise ValueError(f"未対応のフォーマット: {fmt}")
+
+
+def _mml_kwargs_from_args(args: argparse.Namespace) -> dict[str, object]:
+    return {
+        "dialect": getattr(args, "mml_dialect", "ppmck"),
+        "max_repeat": getattr(args, "max_repeat", PYXEL_DEFAULT_MAX_REPEAT),
+    }
 
 
 def resolve_track_specs(
@@ -1786,11 +2393,14 @@ def resolve_track_specs(
     specs: list[tuple[list[NoteEvent], SynthConfig]] = []
 
     if fmt == "mml":
-        parsed_tracks = parse_mml_source(text, config)
+        mml_kwargs = _mml_kwargs_from_args(args)
+        parsed_tracks = parse_mml_source(text, config, **mml_kwargs)
         if len(parsed_tracks) > 1 or (parsed_tracks and parsed_tracks[0].channel):
             for parsed in parsed_tracks:
                 track_config = apply_synth_overrides(config, parsed.synth_overrides)
                 specs.append((parsed.events, track_config))
+        elif mml_kwargs["dialect"] == "pyxel":
+            specs.append((parsed_tracks[0].events, config))
     else:
         specs.append((parse_abc(text, config), config))
 
@@ -1804,7 +2414,7 @@ def resolve_track_specs(
         style_index = extra_index
         if style_index < len(args.track_style):
             track_config = replace(config, waveform=args.track_style[style_index])
-        specs.append((parse_track_text(extra_text, main_fmt, track_config), track_config))
+        specs.append((parse_track_text(extra_text, main_fmt, config, args), track_config))
         extra_index += 1
 
     for path_text in args.track_file:
@@ -1815,15 +2425,22 @@ def resolve_track_specs(
         style_index = extra_index
         if style_index < len(args.track_style):
             track_config = replace(config, waveform=args.track_style[style_index])
-        specs.append((parse_track_text(extra_text, extra_fmt, track_config), track_config))
+        specs.append((parse_track_text(extra_text, extra_fmt, config, args), track_config))
         extra_index += 1
 
     return specs
 
 
-def parse_track_text(text: str, fmt: str, config: SynthConfig) -> list[NoteEvent]:
+def parse_track_text(
+    text: str,
+    fmt: str,
+    config: SynthConfig,
+    args: argparse.Namespace | None = None,
+) -> list[NoteEvent]:
     if fmt == "abc":
         return parse_abc(text, config)
+    if args is not None:
+        return parse_mml_by_dialect(text, config, **_mml_kwargs_from_args(args))
     return parse_mml(text, config)
 
 
@@ -1851,6 +2468,23 @@ def create_parser() -> argparse.ArgumentParser:
     parser.add_argument("--input-file", "-f", help="MML/ABC テキストファイル")
     parser.add_argument("--abc", help="ABC 記譜テキスト")
     parser.add_argument("--format", choices=["mml", "abc"], default="mml", help="入力フォーマット")
+    parser.add_argument(
+        "--mml-dialect",
+        choices=["ppmck", "pyxel"],
+        default="ppmck",
+        help="MML 方言（既定: ppmck。pyxel は Pyxel 2.4+ 記法）",
+    )
+    parser.add_argument(
+        "--max-repeat",
+        type=int,
+        default=PYXEL_DEFAULT_MAX_REPEAT,
+        help="Pyxel 方言で [ ] 回数省略時の展開回数（正の整数、既定: 2）",
+    )
+    parser.add_argument(
+        "--pyxel-compat-report",
+        action="store_true",
+        help="Pyxel 方言で非推奨・未対応トークンの警告を stderr に出力",
+    )
     parser.add_argument("--preset", "-p", choices=sorted(SFX_PRESETS), help="内蔵 SFX プリセット")
     parser.add_argument(
         "--output",
@@ -1995,7 +2629,15 @@ def main(argv: Sequence[str] | None = None) -> int:
         return 0
 
     try:
+        if args.max_repeat < 1:
+            raise ValueError("--max-repeat は正の整数を指定してください")
+
         config = build_config_from_args(args)
+        input_text = read_input_text(args)
+        if args.pyxel_compat_report and input_text.strip():
+            for issue in report_pyxel_compat_issues(input_text):
+                print(f"Pyxel互換警告: {issue}", file=sys.stderr)
+
         track_specs = resolve_track_specs(args, config)
         track_audios = [
             synthesize_sequence(track_events, track_config)
