@@ -47,8 +47,8 @@ _workingspace/
 4. `.rulesync/` と `rulesync.jsonc` を追加または統合する
 5. `tools/kernel/` に必要なツールを置く
 6. `.gitignore` に rulesync 生成物と `_workingspace/` の扱いを追記する
-7. `npx rulesync generate --dry-run` で生成内容を確認する
-8. 了承後に `npx rulesync generate` を実行する
+7. `corepack pnpm dlx rulesync generate --dry-run` で生成内容を確認する
+8. 了承後に `corepack pnpm dlx rulesync generate` を実行する
 9. 必要なら `overview.md` を作るか確認し、プロジェクトの目的・成果物・制約を聞く
 
 ## 新規プロジェクト作成モード
@@ -59,13 +59,13 @@ _workingspace/
 導入の基本コマンド:
 
 ```bash
-npm install -g rulesync
+corepack enable
 uv run python init.py
-npx rulesync generate --dry-run
-npx rulesync generate
+corepack pnpm dlx rulesync generate --dry-run
+corepack pnpm dlx rulesync generate
 ```
 
-`npx rulesync` だけでは、現在の rulesync ではヘルプが表示されるだけです。
+`corepack pnpm dlx rulesync` だけでは、現在の rulesync ではヘルプが表示されるだけです。
 生成には `generate` サブコマンドを使います。
 
 ## .gitignore 例

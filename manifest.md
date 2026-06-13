@@ -59,6 +59,6 @@ rulesync の管理外。人間が読む説明ドキュメント。
 
 ## 最小セット（どれか1つから始めるなら）
 
-- **ルールだけ**: `.rulesync/rules/concepts.md` + `rulesync.jsonc` + `npx rulesync generate` 実行
+- **ルールだけ**: `.rulesync/rules/concepts.md` + `rulesync.jsonc` + `corepack pnpm dlx rulesync generate` 実行
 - **ログまで**: 上記に `tools/kernel/workspace_audit_log.py` を追加
 - **音源生成まで**: 上記に `sfx_generator.py` と `.rulesync/skills/audio-generation/SKILL.md` を追加

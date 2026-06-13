@@ -8,7 +8,7 @@ import re
 import subprocess
 import sys
 import tempfile
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from shutil import which
 from typing import Iterable, Sequence
@@ -671,14 +671,16 @@ MML_TOKEN_RE = re.compile(
     r"""
     (?P<loop_start>\[) |
     (?P<loop_end>\]) |
-    (?P<loop_count>\|\s*\d+) |
+    (?P<octave_up>>) |
+    (?P<octave_down><) |
+    (?P<tie>&) |
     (?P<fm_pct>%\d+) |
     (?P<fm_mul>\*\d+) |
     (?P<lfo_cmd>~\d+) |
     (?P<sample>W\([^)]+\)) |
-    (?P<cmd>[OTLVR@][+-]?\d*) |
+    (?P<cmd>[OTLV@][+-]?\d*) |
     (?P<rest>R(?:\d+)?) |
-    (?P<note>[A-G][+#-]?(?:-?\d+)?(?:\.*)?)
+    (?P<note>[A-G][+#-]?\d*\.*)
     """,
     re.VERBOSE | re.IGNORECASE,
 )
@@ -757,12 +759,23 @@ def parse_mml(text: str, default_config: SynthConfig | None = None) -> list[Note
     for key, path in sample_paths.items():
         compact = compact.replace(f"W({key.upper()})", f"W({path})")
 
+    tie_pending = False
+
+    def emit(event: NoteEvent) -> None:
+        nonlocal tie_pending
+        if tie_pending and events:
+            events[-1].duration += event.duration
+        else:
+            events.append(event)
+        tie_pending = False
+
     pos = 0
     while pos < len(compact):
         match = MML_TOKEN_RE.match(compact, pos)
         if not match:
-            pos += 1
-            continue
+            raise ValueError(
+                f"未対応のMMLトークンです: {compact[pos:pos + 10]!r} (位置 {pos})"
+            )
 
         pos = match.end()
         if match.group("loop_start"):
@@ -770,10 +783,16 @@ def parse_mml(text: str, default_config: SynthConfig | None = None) -> list[Note
             continue
 
         if match.group("loop_end"):
-            count_match = re.match(r"\|(\d+)", compact[pos:])
-            repeat = int(count_match.group(1)) if count_match else 2
-            if count_match:
-                pos += count_match.end()
+            direct_match = re.match(r"(\d+)", compact[pos:])
+            pipe_match = re.match(r"\|(\d+)", compact[pos:])
+            if direct_match:
+                repeat = int(direct_match.group(1))
+                pos += direct_match.end()
+            elif pipe_match:
+                repeat = int(pipe_match.group(1))
+                pos += pipe_match.end()
+            else:
+                repeat = 2
             if not loop_stack:
                 continue
             start_idx, saved_state = loop_stack.pop()
@@ -782,6 +801,10 @@ def parse_mml(text: str, default_config: SynthConfig | None = None) -> list[Note
             for _ in range(repeat):
                 events.extend(segment)
             state = saved_state
+            continue
+
+        if match.group("tie"):
+            tie_pending = True
             continue
 
         if match.group("cmd"):
@@ -799,13 +822,19 @@ def parse_mml(text: str, default_config: SynthConfig | None = None) -> list[Note
                 state.tempo = max(number, 1)
             elif kind == "V":
                 state.volume = min(max(number, 0), 15)
-            elif kind == "R":
-                pass
             elif kind == "@":
                 preset = WAVEFORM_PRESETS.get(number)
                 if preset:
                     state.waveform = preset.get("waveform", state.waveform)
                     state.duty = preset.get("duty", state.duty)
+            continue
+
+        if match.group("octave_up"):
+            state.octave += 1
+            continue
+
+        if match.group("octave_down"):
+            state.octave -= 1
             continue
 
         if match.group("fm_pct"):
@@ -824,7 +853,7 @@ def parse_mml(text: str, default_config: SynthConfig | None = None) -> list[Note
             sample_token = match.group("sample")
             state.sample_path = sample_token[2:-1]
             duration = mml_length_to_seconds(state.length, 0, state.tempo)
-            events.append(
+            emit(
                 make_note_event(
                     state=state,
                     default_config=default_config,
@@ -842,7 +871,7 @@ def parse_mml(text: str, default_config: SynthConfig | None = None) -> list[Note
             if length_match:
                 length = int(length_match.group(1))
             duration = mml_length_to_seconds(length, 0, state.tempo)
-            events.append(
+            emit(
                 make_note_event(
                     state=state,
                     default_config=default_config,
@@ -854,17 +883,16 @@ def parse_mml(text: str, default_config: SynthConfig | None = None) -> list[Note
 
         if match.group("note"):
             token = match.group("note")
-            note_match = re.match(r"([A-G](?:\+|#|-)?)(-?\d*)((\.*)*)", token, re.IGNORECASE)
+            note_match = re.match(r"([A-G](?:\+|#|-)?)(\d*)(\.*)", token, re.IGNORECASE)
             if not note_match:
                 continue
             name = note_match.group(1)
-            octave_text = note_match.group(2)
+            length_text = note_match.group(2)
             dots = note_match.group(3) or ""
-            length = state.length
-            octave = int(octave_text) if octave_text else state.octave
-            freq = note_name_to_freq(name, octave)
+            length = int(length_text) if length_text else state.length
+            freq = note_name_to_freq(name, state.octave)
             duration = mml_length_to_seconds(length, len(dots), state.tempo)
-            events.append(
+            emit(
                 make_note_event(
                     state=state,
                     default_config=default_config,
@@ -1136,13 +1164,13 @@ SFX_PRESETS: dict[str, dict[str, str | SynthConfig]] = {
     "jump": {
         "description": "上昇音で表現するジャンプ",
         "format": "mml",
-        "mml": "T240 L16 V15 O4 C4 E4 G4 C5",
+        "mml": "T240 L16 V15 O4 C E G >C",
         "config": SynthConfig(waveform="square", duty=0.25, adsr=ADSR(0.002, 0.04, 0.35, 0.04)),
     },
     "coin": {
         "description": "明るく短いコイン取得音",
         "format": "mml",
-        "mml": "T300 L16 V14 O6 B5 E6 B6",
+        "mml": "T300 L16 V14 O6 <B >E B",
         "config": SynthConfig(
             waveform="sine",
             adsr=ADSR(0.001, 0.08, 0.1, 0.12),
@@ -1152,7 +1180,7 @@ SFX_PRESETS: dict[str, dict[str, str | SynthConfig]] = {
     "hit": {
         "description": "短い打撃音",
         "format": "mml",
-        "mml": "T240 L16 V15 O4 C4",
+        "mml": "T240 L16 V15 O4 C",
         "config": SynthConfig(
             waveform="noise",
             volume=0.65,
@@ -1165,7 +1193,7 @@ SFX_PRESETS: dict[str, dict[str, str | SynthConfig]] = {
     "explosion": {
         "description": "低域の強い爆発音",
         "format": "mml",
-        "mml": "T100 L2 V15 O3 C3",
+        "mml": "T100 L2 V15 O3 C",
         "config": SynthConfig(
             waveform="noise",
             noise_color="brown",
@@ -1177,7 +1205,7 @@ SFX_PRESETS: dict[str, dict[str, str | SynthConfig]] = {
     "laser": {
         "description": "FM変調された下降レーザー",
         "format": "mml",
-        "mml": "T300 L32 V13 O7 C7 B6 G6 E6 C6 G5",
+        "mml": "T300 L32 V13 O7 C <B G E C <G",
         "config": SynthConfig(
             waveform="sawtooth",
             filter_type="lowpass",
@@ -1190,19 +1218,19 @@ SFX_PRESETS: dict[str, dict[str, str | SynthConfig]] = {
     "powerup": {
         "description": "段階的に上昇するパワーアップ",
         "format": "mml",
-        "mml": "T280 L16 V14 O4 C4 E4 G4 C5 E5 G5 C6",
+        "mml": "T280 L16 V14 O4 C E G >C E G >C",
         "config": SynthConfig(waveform="square", duty=0.25, adsr=ADSR(0.002, 0.03, 0.65, 0.05)),
     },
     "select": {
         "description": "控えめなUI選択音",
         "format": "mml",
-        "mml": "T300 L32 V11 O6 C6",
+        "mml": "T300 L32 V11 O6 C",
         "config": SynthConfig(waveform="sine", adsr=ADSR(0.001, 0.025, 0.25, 0.035)),
     },
     "confirm": {
         "description": "肯定感のあるUI決定音",
         "format": "mml",
-        "mml": "T240 L16 V13 O5 C5 E5 G5 C6",
+        "mml": "T240 L16 V13 O5 C E G >C",
         "config": SynthConfig(
             waveform="sine",
             adsr=ADSR(0.002, 0.08, 0.25, 0.1),
@@ -1212,7 +1240,7 @@ SFX_PRESETS: dict[str, dict[str, str | SynthConfig]] = {
     "damage": {
         "description": "低く濁ったダメージ音",
         "format": "mml",
-        "mml": "T220 L16 V15 O4 A4 F4 D4 A3",
+        "mml": "T220 L16 V15 O4 A F D <A",
         "config": SynthConfig(
             waveform="sawtooth",
             filter_type="lowpass",
@@ -1223,7 +1251,7 @@ SFX_PRESETS: dict[str, dict[str, str | SynthConfig]] = {
     "victory": {
         "description": "短い勝利ファンファーレ",
         "format": "mml",
-        "mml": "T200 L8 V14 O4 C4 E4 G4 C5 R16 G4 C5 E5 G5 C6.",
+        "mml": "T200 L8 V14 O4 C E G >C R16 <G >C E G >C.",
         "config": SynthConfig(waveform="square", duty=0.25, adsr=ADSR(0.004, 0.06, 0.55, 0.1)),
     },
 }
@@ -1470,6 +1498,14 @@ def create_parser() -> argparse.ArgumentParser:
         help="追加トラックの MML/ABC ファイル（拡張子 .abc は ABC として解釈、複数指定可）",
     )
     parser.add_argument(
+        "--track-style",
+        action="append",
+        default=[],
+        choices=["square", "sawtooth", "triangle", "sine", "noise"],
+        metavar="WAVEFORM",
+        help="追加トラックごとの波形（--track / --track-file を並べた順に対応。未指定分は--styleを使用、複数指定可）",
+    )
+    parser.add_argument(
         "--overlay-sample",
         action="append",
         default=[],
@@ -1500,9 +1536,12 @@ def main(argv: Sequence[str] | None = None) -> int:
         total_events = len(events)
         if extra_tracks:
             track_audios = [audio]
-            for track_events in extra_tracks:
+            for index, track_events in enumerate(extra_tracks):
                 total_events += len(track_events)
-                track_audios.append(synthesize_sequence(track_events, config))
+                track_config = config
+                if index < len(args.track_style):
+                    track_config = replace(config, waveform=args.track_style[index])
+                track_audios.append(synthesize_sequence(track_events, track_config))
             audio = mix_tracks(track_audios)
 
         for spec in args.overlay_sample:

@@ -1,8 +1,10 @@
 import math
+import tempfile
 import unittest
 from pathlib import Path
 
 import numpy as np
+from scipy.io import wavfile
 
 from sfx_generator import (
     ADSR,
@@ -18,11 +20,14 @@ from sfx_generator import (
     abc_quarter_note_tempo,
     apply_master_fade,
     apply_audio_filter,
+    create_parser,
     generate_colored_noise,
+    main,
     mix_tracks,
     load_preset,
     note_name_to_freq,
     parse_abc,
+    parse_mml,
     synthesize_note,
     synthesize_sequence,
 )
@@ -127,6 +132,31 @@ class AudioQualityTests(unittest.TestCase):
             self.assertLess(float(np.max(np.abs(audio))), 0.99)
 
 
+class TrackStyleTests(unittest.TestCase):
+    def test_track_style_parses_in_declared_order(self) -> None:
+        parser = create_parser()
+        args = parser.parse_args(
+            ["--track-style", "sine", "--track-style", "triangle"]
+        )
+        self.assertEqual(args.track_style, ["sine", "triangle"])
+
+    def test_track_style_overrides_waveform_for_that_track(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            output = str(Path(tmpdir) / "track_style_sample")
+            exit_code = main(
+                [
+                    "--input", "O4 L4 T120 C E G C",
+                    "--style", "square",
+                    "--track", "O4 L4 T120 C E G C",
+                    "--track-style", "sine",
+                    "-o", output,
+                ]
+            )
+            self.assertEqual(exit_code, 0)
+            _, audio = wavfile.read(output + ".wav")
+            self.assertGreater(audio.size, 0)
+
+
 class AbcTimingTests(unittest.TestCase):
     def test_q_header_uses_declared_beat_unit(self) -> None:
         self.assertEqual(abc_quarter_note_tempo("1/4=120"), 120.0)
@@ -225,6 +255,130 @@ class AmazingGraceBenchmarkTests(unittest.TestCase):
         self.assertAlmostEqual(events[1].duration, quarter * 2)
         self.assertAlmostEqual(events[2].duration, quarter / 2)
         self.assertAlmostEqual(sum(event.duration for event in events), 36.0)
+
+
+class CanonInDBenchmarkTests(unittest.TestCase):
+    def test_ground_bass_pitch_and_timing(self) -> None:
+        events = parse_mml((ROOT / "scores" / "canon_in_d_bass.mml").read_text(encoding="utf-8"))
+        expected_notes = "D A B F# G D G A D A B F# G D G A".split()
+
+        self.assertEqual(len(events), len(expected_notes))
+        for event, note in zip(events, expected_notes):
+            self.assertAlmostEqual(event.frequency, note_name_to_freq(note, 3))
+
+        quarter = 60.0 / 96
+        for event in events:
+            self.assertAlmostEqual(event.duration, quarter)
+
+    def test_round_voices_form_canon_with_bass(self) -> None:
+        bass = parse_mml((ROOT / "scores" / "canon_in_d_bass.mml").read_text(encoding="utf-8"))
+        voice1 = parse_mml((ROOT / "scores" / "canon_in_d_round1.mml").read_text(encoding="utf-8"))
+        voice2 = parse_mml((ROOT / "scores" / "canon_in_d_round2.mml").read_text(encoding="utf-8"))
+        expected_notes = "D A B F# G D G A D A B F# G D G A".split()
+
+        self.assertEqual(len(voice1), len(expected_notes))
+        for event, note in zip(voice1, expected_notes):
+            self.assertAlmostEqual(event.frequency, note_name_to_freq(note, 4))
+
+        # voice2はバスより2拍子(2小節)遅れて同じ旋律を演奏するカノン構造。
+        self.assertEqual(len(voice2), 2 + 8)
+        self.assertIsNone(voice2[0].frequency)
+        self.assertIsNone(voice2[1].frequency)
+        for event, note in zip(voice2[2:], expected_notes[:8]):
+            self.assertAlmostEqual(event.frequency, note_name_to_freq(note, 4))
+
+        self.assertAlmostEqual(
+            sum(event.duration for event in bass),
+            sum(event.duration for event in voice1),
+        )
+        self.assertAlmostEqual(
+            sum(event.duration for event in voice1),
+            sum(event.duration for event in voice2),
+        )
+
+
+class MmlNoteLengthTests(unittest.TestCase):
+    def test_note_without_digit_uses_default_length(self) -> None:
+        events = parse_mml("O4 L8 T120 C")
+        self.assertEqual(len(events), 1)
+        self.assertAlmostEqual(events[0].frequency, note_name_to_freq("C", 4))
+        self.assertAlmostEqual(events[0].duration, 0.25)
+
+    def test_note_with_digit_overrides_length(self) -> None:
+        events = parse_mml("O4 L8 T120 C4")
+        self.assertEqual(len(events), 1)
+        self.assertAlmostEqual(events[0].frequency, note_name_to_freq("C", 4))
+        self.assertAlmostEqual(events[0].duration, 0.5)
+
+    def test_dotted_note_with_length_override(self) -> None:
+        events = parse_mml("O4 T120 C4.")
+        self.assertEqual(len(events), 1)
+        self.assertAlmostEqual(events[0].duration, 0.75)
+
+    def test_relative_octave_commands_shift_pitch(self) -> None:
+        events = parse_mml("O4 T120 L4 C >C <<C")
+        self.assertEqual(len(events), 3)
+        self.assertAlmostEqual(events[0].frequency, note_name_to_freq("C", 4))
+        self.assertAlmostEqual(events[1].frequency, note_name_to_freq("C", 5))
+        self.assertAlmostEqual(events[2].frequency, note_name_to_freq("C", 3))
+
+    def test_tie_combines_durations_into_single_event(self) -> None:
+        events = parse_mml("O4 T120 L4 C&C")
+        self.assertEqual(len(events), 1)
+        self.assertAlmostEqual(events[0].frequency, note_name_to_freq("C", 4))
+        self.assertAlmostEqual(events[0].duration, 60.0 / 120 * 2)
+
+    def test_tie_chain_combines_multiple_durations(self) -> None:
+        events = parse_mml("O4 T120 L4 C&C&C8")
+        self.assertEqual(len(events), 1)
+        quarter = 60.0 / 120
+        self.assertAlmostEqual(events[0].duration, quarter * 2 + quarter / 2)
+
+    def test_loop_with_direct_repeat_count(self) -> None:
+        events = parse_mml("O4 T120 L4 [CD]3")
+        self.assertEqual(len(events), 6)
+        for index, (name, octave) in enumerate([("C", 4), ("D", 4)] * 3):
+            self.assertAlmostEqual(events[index].frequency, note_name_to_freq(name, octave))
+
+    def test_rest_with_explicit_length_creates_silent_event(self) -> None:
+        events = parse_mml("O4 T120 L4 C R8 C")
+        self.assertEqual(len(events), 3)
+        self.assertIsNone(events[1].frequency)
+        eighth = 60.0 / 120 / 2
+        self.assertAlmostEqual(events[1].duration, eighth)
+
+    def test_bare_rest_uses_default_length(self) -> None:
+        events = parse_mml("O4 T120 L4 R")
+        self.assertEqual(len(events), 1)
+        self.assertIsNone(events[0].frequency)
+        quarter = 60.0 / 120
+        self.assertAlmostEqual(events[0].duration, quarter)
+
+    def test_unsupported_token_raises_value_error(self) -> None:
+        with self.assertRaises(ValueError):
+            parse_mml("O4 T120 L4 C;D")
+
+    def test_preset_pitch_sequences_match_expected_notes(self) -> None:
+        expected_by_preset = {
+            "jump": [("C", 4), ("E", 4), ("G", 4), ("C", 5)],
+            "coin": [("B", 5), ("E", 6), ("B", 6)],
+            "powerup": [("C", 4), ("E", 4), ("G", 4), ("C", 5), ("E", 5), ("G", 5), ("C", 6)],
+            "damage": [("A", 4), ("F", 4), ("D", 4), ("A", 3)],
+            # R16 は休符イベント(frequency=None)を生成する。
+            "victory": [
+                ("C", 4), ("E", 4), ("G", 4), ("C", 5), None,
+                ("G", 4), ("C", 5), ("E", 5), ("G", 5), ("C", 6),
+            ],
+        }
+        for preset_name, expected_notes in expected_by_preset.items():
+            events = parse_mml(SFX_PRESETS[preset_name]["mml"])
+            self.assertEqual(len(events), len(expected_notes))
+            for event, expected in zip(events, expected_notes):
+                if expected is None:
+                    self.assertIsNone(event.frequency)
+                    continue
+                name, octave = expected
+                self.assertAlmostEqual(event.frequency, note_name_to_freq(name, octave))
 
 
 if __name__ == "__main__":

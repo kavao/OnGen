@@ -55,8 +55,8 @@ uv run python init.py
 ルール再生成:
 
 ```bash
-npx rulesync generate --dry-run
-npx rulesync generate
+corepack pnpm dlx rulesync generate --dry-run
+corepack pnpm dlx rulesync generate
 ```
 
 査証ログ追記:

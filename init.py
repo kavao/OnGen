@@ -27,7 +27,7 @@ def init() -> None:
     print("  uv run python tools/kernel/json_weighted_pick.py <file.json> -p <path>")
     print()
     print("Generate rules for configured LLM tools:")
-    print("  npx rulesync generate")
+    print("  corepack pnpm dlx rulesync generate")
 
 
 if __name__ == "__main__":

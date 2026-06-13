@@ -11,7 +11,7 @@ description: "OnGenプロジェクト固有の目的・正本・検証ルール"
 - ユーザー向け正式名称は `OnGen` とする。CLIファイル名 `sfx_generator.py` と既存パス名は互換性のため維持する。
 - OnGenはMIT Licenseで公開する。ライセンス正本はルートの`LICENSE`とする。
 - Rulesyncの `audio-generation` スキルから、プリセット、MML、ABC、複数トラック生成を再利用できる状態にする。
-- MMLは独自互換性を壊さず、PPMCK / MCK互換モードを段階的に追加する。
+- MMLは音符ごとの音長指定（`c4`等）と相対オクターブ変更（`>` / `<`）をPPMCK / MCK流に統一済みとする。
 
 ## Sources of truth
 
@@ -30,6 +30,6 @@ description: "OnGenプロジェクト固有の目的・正本・検証ルール"
 
 ## MML compatibility
 
-- 現行の独自MMLとPPMCK / MCK記法の意味が衝突する場合、黙って挙動を変更しない。
-- PPMCK / MCK対応は明示的な互換モードとして追加し、既存入力の回帰テストを維持する。
+- 音符直後の数字はPPMCK / MCKと同じく音長を表す。オクターブは`O`コマンドおよび相対オクターブ変更`>` / `<`で指定する（旧来の「数字=オクターブ」解釈には戻さない）。
+- この移行は破壊的変更として直接適用済みであり、既存のプリセット・スコア・ドキュメントは新表記に統一する。
 - 対応状況と非互換点はREADMEと `_workingspace/plans/mml-compatibility-roadmap.md` に反映する。
