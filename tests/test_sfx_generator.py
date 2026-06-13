@@ -38,6 +38,7 @@ abc_length_multiplier = sg.abc_length_multiplier
 abc_quarter_note_tempo = sg.abc_quarter_note_tempo
 apply_master_fade = sg.apply_master_fade
 apply_audio_filter = sg.apply_audio_filter
+build_config_from_args = sg.build_config_from_args
 create_parser = sg.create_parser
 generate_colored_noise = sg.generate_colored_noise
 main = sg.main
@@ -46,6 +47,11 @@ load_preset = sg.load_preset
 note_name_to_freq = sg.note_name_to_freq
 parse_abc = sg.parse_abc
 parse_mml = sg.parse_mml
+parse_mml_source = sg.parse_mml_source
+resolve_track_specs = sg.resolve_track_specs
+split_ppmck_tracks = sg.split_ppmck_tracks
+has_ppmck_track_headers = sg.has_ppmck_track_headers
+PPMCK_CHANNEL_MAP = sg.PPMCK_CHANNEL_MAP
 play_audio = sg.play_audio
 synthesize_note = sg.synthesize_note
 synthesize_sequence = sg.synthesize_sequence
@@ -544,6 +550,119 @@ class MmlPhase2CompatTests(unittest.TestCase):
         self.assertAlmostEqual(events[4].frequency, note_name_to_freq("C", 3))
         self.assertAlmostEqual(events[4].duration, quarter / 2 - 0.05)
         self.assertIsNone(events[5].frequency)
+
+
+class MmlPhase3CompatTests(unittest.TestCase):
+    def test_split_line_start_track_headers(self) -> None:
+        split = split_ppmck_tracks("A T120 C4\nB T120 E4")
+        self.assertIsNotNone(split)
+        assert split is not None
+        self.assertEqual(set(split.keys()), {"A", "B"})
+        self.assertIn("T120 C4", split["A"])
+        self.assertIn("T120 E4", split["B"])
+
+    def test_split_inline_track_switch(self) -> None:
+        split = split_ppmck_tracks("A C4\nB D4")
+        self.assertIsNotNone(split)
+        assert split is not None
+        self.assertEqual(split["A"], "C4")
+        self.assertEqual(split["B"], "D4")
+
+    def test_split_inline_plural_header(self) -> None:
+        split = split_ppmck_tracks("AB C4 E4")
+        self.assertIsNotNone(split)
+        assert split is not None
+        self.assertEqual(split["A"], "C4 E4")
+        self.assertEqual(split["B"], "C4 E4")
+
+    def test_split_continues_across_lines_without_header(self) -> None:
+        split = split_ppmck_tracks("A T120\nC4 D4")
+        self.assertIsNotNone(split)
+        assert split is not None
+        self.assertEqual(split["A"], "T120 C4 D4")
+
+    def test_single_track_without_headers_returns_none(self) -> None:
+        self.assertIsNone(split_ppmck_tracks("O4 T120 L4 C4 D4"))
+        self.assertIsNone(split_ppmck_tracks("A C4 D4 E4"))
+        self.assertIsNone(split_ppmck_tracks("C D E F"))
+
+    def test_single_clear_track_header_is_detected(self) -> None:
+        self.assertEqual(split_ppmck_tracks("A @1 C4"), {"A": "@1 C4"})
+
+    def test_lines_before_first_track_header_apply_to_every_track(self) -> None:
+        split = split_ppmck_tracks("T120 L8\nA c4\nB e4")
+        self.assertEqual(split, {"A": "T120 L8 c4", "B": "T120 L8 e4"})
+
+    def test_parse_mml_source_returns_single_track_without_headers(self) -> None:
+        tracks = parse_mml_source("O4 T120 L4 C4")
+        self.assertEqual(len(tracks), 1)
+        self.assertEqual(tracks[0].channel, "")
+        self.assertEqual(len(tracks[0].events), 1)
+
+    def test_parse_mml_source_assigns_channel_defaults(self) -> None:
+        tracks = parse_mml_source("A C4\nC O2 L2 C2\nD R16")
+        by_channel = {track.channel: track for track in tracks}
+        self.assertEqual(by_channel["A"].synth_overrides["waveform"], "square")
+        self.assertEqual(by_channel["C"].synth_overrides["waveform"], "triangle")
+        self.assertEqual(by_channel["D"].synth_overrides["waveform"], "noise")
+        self.assertAlmostEqual(by_channel["A"].events[0].frequency, note_name_to_freq("C", 4))
+        self.assertAlmostEqual(by_channel["C"].events[0].frequency, note_name_to_freq("C", 2))
+
+    def test_pulse_duty_on_channel_a_uses_ppmck_mapping(self) -> None:
+        for token, expected in (("@0", 0.125), ("@1", 0.25), ("@2", 0.5), ("@3", 0.75)):
+            with self.subTest(token=token):
+                event = parse_mml_source(f"A {token} C4")[0].events[0]
+                self.assertEqual(event.waveform, "square")
+                self.assertAlmostEqual(event.duty, expected)
+
+    def test_track_style_still_targets_cli_extra_tracks(self) -> None:
+        parser = create_parser()
+        args = parser.parse_args(
+            [
+                "--input-file",
+                str(ROOT / "scores" / "ppmck_phase3_sample.mml"),
+                "--track",
+                "O4 C4",
+                "--track-style",
+                "sine",
+            ]
+        )
+        config = build_config_from_args(args)
+        specs = resolve_track_specs(args, config)
+        self.assertEqual(len(specs), 5)
+        self.assertEqual(specs[-1][0][0].waveform, "sine")
+        self.assertEqual(specs[0][0][0].waveform, "square")
+
+    def test_ppmck_phase3_sample_score(self) -> None:
+        tracks = parse_mml_source(
+            (ROOT / "scores" / "ppmck_phase3_sample.mml").read_text(encoding="utf-8")
+        )
+        self.assertEqual([track.channel for track in tracks], ["A", "B", "C", "D"])
+        by_channel = {track.channel: track for track in tracks}
+        self.assertEqual(len(by_channel["A"].events), 4)
+        self.assertEqual(len(by_channel["B"].events), 3)
+        self.assertEqual(len(by_channel["C"].events), 3)
+        self.assertEqual(len(by_channel["D"].events), 4)
+        self.assertAlmostEqual(by_channel["A"].events[0].frequency, note_name_to_freq("C", 4))
+        self.assertAlmostEqual(by_channel["B"].events[0].frequency, note_name_to_freq("E", 4))
+        self.assertAlmostEqual(by_channel["C"].events[0].frequency, note_name_to_freq("C", 3))
+
+    def test_embedded_tracks_cli_mixes_without_track_flags(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            output = str(Path(tmpdir) / "phase3_embedded")
+            result = main(
+                [
+                    "--input-file",
+                    str(ROOT / "scores" / "ppmck_phase3_sample.mml"),
+                    "-o",
+                    output,
+                ]
+            )
+            self.assertEqual(result, 0)
+            wav_path = Path(f"{output}.wav")
+            self.assertTrue(wav_path.exists())
+            _, audio = wavfile.read(wav_path)
+            self.assertGreater(audio.size, 0)
 
 
 if __name__ == "__main__":

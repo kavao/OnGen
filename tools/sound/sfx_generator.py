@@ -714,6 +714,42 @@ PPMCK_NOTE_ZERO_MIDI = 36
 PPMCK_TRANSPOSE_MIN = -127
 PPMCK_TRANSPOSE_MAX = 126
 PPMCK_DIRECT_NOTE_MAX = 95
+PPMCK_TRACK_LETTERS = frozenset("ABCDE")
+PPMCK_PULSE_DUTY: dict[int, float] = {
+    0: 0.125,
+    1: 0.25,
+    2: 0.5,
+    3: 0.75,
+}
+PPMCK_CHANNEL_MAP: dict[str, dict[str, object]] = {
+    "A": {"waveform": "square", "duty": 0.5},
+    "B": {"waveform": "square", "duty": 0.5},
+    "C": {"waveform": "triangle"},
+    "D": {"waveform": "noise", "noise_color": "white"},
+    "E": {"waveform": "noise", "noise_color": "white"},
+}
+PPMCK_CHANNEL_ORDER = "ABCDE"
+PPMCK_INLINE_TRACK_HEADER_RE = re.compile(
+    r"(?<=\s)"
+    r"(?:"
+    r"([A-E]{2,})"
+    r"|"
+    r"([A-E])(?=\s+(?:[OTLVQRK@%*\[~]|W\())"
+    r")"
+    r"(?=\s|$)",
+    re.IGNORECASE,
+)
+PPMCK_CLEAR_TRACK_CONTENT_RE = re.compile(
+    r"(?:[OTLVQK@%*\[~]|W\()",
+    re.IGNORECASE,
+)
+
+
+@dataclass
+class ParsedMMLTrack:
+    channel: str
+    events: list[NoteEvent]
+    synth_overrides: dict[str, object]
 
 
 @dataclass
@@ -770,6 +806,187 @@ def preprocess_mml_text(text: str) -> str:
     return " ".join(cleaned_lines)
 
 
+def iter_mml_source_lines(text: str) -> list[str]:
+    lines: list[str] = []
+    for raw_line in text.splitlines():
+        line = raw_line.split(";", 1)[0].strip()
+        if not line:
+            continue
+        if line.startswith("#") and not line.upper().startswith("#GATE-DENOM"):
+            continue
+        lines.append(line)
+    return lines
+
+
+def _read_track_header_at(line: str, pos: int) -> tuple[list[str], int] | None:
+    header_match = re.match(r"[A-E]+", line[pos:])
+    if not header_match:
+        return None
+    header = header_match.group(0)
+    if header != header.upper() or not set(header).issubset(PPMCK_TRACK_LETTERS):
+        return None
+
+    end = pos + header_match.end()
+    if end < len(line) and not line[end].isspace():
+        if len(header) == 1 and (line[end].isdigit() or line[end] in ".+-"):
+            return None
+
+    return list(header), end
+
+
+def _split_line_track_chunks(line: str) -> list[tuple[list[str], str]]:
+    chunks: list[tuple[list[str], str]] = []
+    pos = 0
+    length = len(line)
+
+    while pos < length:
+        while pos < length and line[pos].isspace():
+            pos += 1
+        if pos >= length:
+            break
+
+        header = _read_track_header_at(line, pos)
+        if header is None:
+            if not chunks:
+                return []
+            break
+        track_ids, pos = header
+
+        while pos < length and line[pos].isspace():
+            pos += 1
+
+        content_start = pos
+        next_header = PPMCK_INLINE_TRACK_HEADER_RE.search(line[content_start:])
+        if next_header:
+            header_text = next_header.group(1) or next_header.group(2)
+            candidate_pos = content_start + next_header.start()
+            if (
+                header_text == header_text.upper()
+                and _read_track_header_at(line, candidate_pos) is not None
+            ):
+                content_end = content_start + next_header.start()
+                content = line[content_start:content_end].strip()
+                chunks.append((track_ids, content))
+                pos = candidate_pos
+                continue
+
+        content = line[content_start:].strip()
+        chunks.append((track_ids, content))
+        break
+
+    return chunks
+
+
+def _has_clear_ppmck_track_headers(lines: list[str]) -> bool:
+    channels: set[str] = set()
+    for line in lines:
+        if line.upper().startswith("#GATE-DENOM"):
+            continue
+        chunks = _split_line_track_chunks(line)
+        for track_ids, content in chunks:
+            channels.update(track_ids)
+            if len(track_ids) > 1 or PPMCK_CLEAR_TRACK_CONTENT_RE.match(content):
+                return True
+    return len(channels) > 1
+
+
+def split_ppmck_tracks(text: str) -> dict[str, str] | None:
+    lines = iter_mml_source_lines(text)
+    if not lines:
+        return None
+    if not _has_clear_ppmck_track_headers(lines):
+        return None
+
+    global_directives: list[str] = []
+    common_prefix: list[str] = []
+    track_parts: dict[str, list[str]] = {}
+    active_tracks: list[str] = []
+    saw_header = False
+
+    for line in lines:
+        if line.upper().startswith("#GATE-DENOM"):
+            global_directives.append(line)
+            continue
+
+        chunks = _split_line_track_chunks(line)
+        if not chunks:
+            if not active_tracks:
+                common_prefix.append(line)
+                continue
+            for track_id in active_tracks:
+                track_parts.setdefault(track_id, []).append(line)
+            continue
+
+        for track_ids, content in chunks:
+            saw_header = True
+            active_tracks = track_ids
+            if content:
+                for track_id in active_tracks:
+                    track_parts.setdefault(track_id, []).append(content)
+
+    if not saw_header:
+        return None
+
+    prefix = " ".join([*global_directives, *common_prefix])
+    ordered = [track_id for track_id in PPMCK_CHANNEL_ORDER if track_id in track_parts]
+    result: dict[str, str] = {}
+    for track_id in ordered:
+        body = " ".join(track_parts[track_id])
+        result[track_id] = f"{prefix} {body}".strip() if prefix else body
+    return result
+
+
+def has_ppmck_track_headers(text: str) -> bool:
+    return split_ppmck_tracks(text) is not None
+
+
+def apply_ppmck_channel_defaults(state: MMLState, channel: str | None) -> None:
+    if not channel:
+        return
+    defaults = PPMCK_CHANNEL_MAP.get(channel)
+    if not defaults:
+        return
+    if "waveform" in defaults:
+        state.waveform = str(defaults["waveform"])
+    if "duty" in defaults:
+        state.duty = float(defaults["duty"])
+
+
+def apply_synth_overrides(config: SynthConfig, overrides: dict[str, object]) -> SynthConfig:
+    if not overrides:
+        return config
+    kwargs: dict[str, object] = {}
+    for key, value in overrides.items():
+        if hasattr(config, key):
+            kwargs[key] = value
+    return replace(config, **kwargs) if kwargs else config
+
+
+def parse_mml_source(text: str, default_config: SynthConfig | None = None) -> list[ParsedMMLTrack]:
+    default_config = default_config or SynthConfig()
+    split = split_ppmck_tracks(text)
+    if split is None:
+        return [
+            ParsedMMLTrack(
+                channel="",
+                events=parse_mml(text, default_config),
+                synth_overrides={},
+            )
+        ]
+
+    tracks: list[ParsedMMLTrack] = []
+    for channel in split:
+        overrides = dict(PPMCK_CHANNEL_MAP.get(channel, {}))
+        tracks.append(
+            ParsedMMLTrack(
+                channel=channel,
+                events=parse_mml(split[channel], default_config, channel=channel),
+                synth_overrides=overrides,
+            )
+        )
+    return tracks
+
+
 def mml_apply_gate(full_duration: float, state: MMLState) -> tuple[float, float]:
     denom = state.gate_denom
     if denom < 1 or not 0 <= state.gate <= denom:
@@ -820,9 +1037,15 @@ def make_note_event(
     )
 
 
-def parse_mml(text: str, default_config: SynthConfig | None = None) -> list[NoteEvent]:
+def parse_mml(
+    text: str,
+    default_config: SynthConfig | None = None,
+    *,
+    channel: str | None = None,
+) -> list[NoteEvent]:
     default_config = default_config or SynthConfig()
     state = MMLState()
+    apply_ppmck_channel_defaults(state, channel)
     events: list[NoteEvent] = []
     loop_stack: list[tuple[int, MMLState]] = []
 
@@ -1019,10 +1242,14 @@ def parse_mml(text: str, default_config: SynthConfig | None = None) -> list[Note
             elif kind == "V":
                 state.volume = min(max(number, 0), 15)
             elif kind == "@":
-                preset = WAVEFORM_PRESETS.get(number)
-                if preset:
-                    state.waveform = preset.get("waveform", state.waveform)
-                    state.duty = preset.get("duty", state.duty)
+                if channel in ("A", "B") and 0 <= number <= 3:
+                    state.waveform = "square"
+                    state.duty = PPMCK_PULSE_DUTY[number]
+                else:
+                    preset = WAVEFORM_PRESETS.get(number)
+                    if preset:
+                        state.waveform = preset.get("waveform", state.waveform)
+                        state.duty = preset.get("duty", state.duty)
             continue
 
         if match.group("octave_up"):
@@ -1536,6 +1763,64 @@ def resolve_events(args: argparse.Namespace, config: SynthConfig) -> list[NoteEv
     raise ValueError(f"未対応のフォーマット: {fmt}")
 
 
+def resolve_track_specs(
+    args: argparse.Namespace,
+    config: SynthConfig,
+) -> list[tuple[list[NoteEvent], SynthConfig]]:
+    if args.preset:
+        events = resolve_events(args, config)
+        return [(events, config)]
+
+    text = read_input_text(args)
+    if args.abc:
+        text = args.abc
+        fmt = "abc"
+    elif args.format:
+        fmt = args.format.lower()
+    else:
+        fmt = "mml"
+
+    if not text.strip():
+        raise ValueError("入力が空です。--input / --abc / --preset / 標準入力を指定してください。")
+
+    specs: list[tuple[list[NoteEvent], SynthConfig]] = []
+
+    if fmt == "mml":
+        parsed_tracks = parse_mml_source(text, config)
+        if len(parsed_tracks) > 1 or (parsed_tracks and parsed_tracks[0].channel):
+            for parsed in parsed_tracks:
+                track_config = apply_synth_overrides(config, parsed.synth_overrides)
+                specs.append((parsed.events, track_config))
+    else:
+        specs.append((parse_abc(text, config), config))
+
+    if not specs:
+        specs.append((resolve_events(args, config), config))
+
+    main_fmt = "abc" if fmt == "abc" else "mml"
+    extra_index = 0
+    for extra_text in args.track:
+        track_config = config
+        style_index = extra_index
+        if style_index < len(args.track_style):
+            track_config = replace(config, waveform=args.track_style[style_index])
+        specs.append((parse_track_text(extra_text, main_fmt, track_config), track_config))
+        extra_index += 1
+
+    for path_text in args.track_file:
+        path = Path(path_text)
+        extra_text = path.read_text(encoding="utf-8")
+        extra_fmt = "abc" if path.suffix.lower() == ".abc" else main_fmt
+        track_config = config
+        style_index = extra_index
+        if style_index < len(args.track_style):
+            track_config = replace(config, waveform=args.track_style[style_index])
+        specs.append((parse_track_text(extra_text, extra_fmt, track_config), track_config))
+        extra_index += 1
+
+    return specs
+
+
 def parse_track_text(text: str, fmt: str, config: SynthConfig) -> list[NoteEvent]:
     if fmt == "abc":
         return parse_abc(text, config)
@@ -1711,20 +1996,14 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     try:
         config = build_config_from_args(args)
-        events = resolve_events(args, config)
-        audio = synthesize_sequence(events, config)
-
-        extra_tracks = resolve_extra_tracks(args, config)
-        total_events = len(events)
-        if extra_tracks:
-            track_audios = [audio]
-            for index, track_events in enumerate(extra_tracks):
-                total_events += len(track_events)
-                track_config = config
-                if index < len(args.track_style):
-                    track_config = replace(config, waveform=args.track_style[index])
-                track_audios.append(synthesize_sequence(track_events, track_config))
-            audio = mix_tracks(track_audios)
+        track_specs = resolve_track_specs(args, config)
+        track_audios = [
+            synthesize_sequence(track_events, track_config)
+            for track_events, track_config in track_specs
+        ]
+        audio = mix_tracks(track_audios) if len(track_audios) > 1 else track_audios[0]
+        total_events = sum(len(track_events) for track_events, _ in track_specs)
+        extra_tracks = max(0, len(track_specs) - 1)
 
         for spec in args.overlay_sample:
             overlay, offset, gain = parse_overlay_spec(spec, config.sample_root)
@@ -1747,7 +2026,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         if args.overlay_sample:
             extras.append(f"overlay×{len(args.overlay_sample)}")
         if extra_tracks:
-            extras.append(f"track×{len(extra_tracks) + 1}")
+            extras.append(f"track×{len(track_specs)}")
         if args.output_format != "wav":
             extras.append(args.output_format)
         if args.play:

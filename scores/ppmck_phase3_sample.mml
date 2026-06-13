@@ -1,0 +1,10 @@
+#TITLE PPMCK phase3 multi-track sample
+; square melody, square harmony, triangle bass, noise percussion
+A @1 V12 O4 L4 T120
+C4 E4 G4 C5
+B @2 V10 O4 L8
+E8 G8 C8
+C V8 O3 L2
+C2 G2 E2
+D V15 L16
+C4 C4 C4 C4
