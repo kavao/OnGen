@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# Version: 0.4.0 (正本: .rulesync/metadata/sfx-generator.json)
+# Version: 0.4.1 (正本: .rulesync/metadata/sfx-generator.json)
 """OnGen: NumPy/SciPy ベースのMML・ABC音源合成ツール。"""
 
 from __future__ import annotations
@@ -19,7 +19,7 @@ import numpy as np
 from scipy.io import wavfile
 from scipy.signal import butter, sosfilt
 
-__version__ = "0.4.0"
+__version__ = "0.4.1"
 
 SAMPLE_RATE = 44100
 BIT_DEPTH = 16
@@ -490,6 +490,7 @@ def synthesize_note(event: NoteEvent, config: SynthConfig) -> np.ndarray:
 
     wave = synthesize_oscillator(waveform, num_samples, event.frequency, duty, config, event)
     wave = apply_audio_filter(wave, config.filter_type, config.cutoff)
+    wave = np.clip(wave, -1.0, 1.0)
     env = (event.event_adsr or config.adsr).envelope(num_samples)
     return wave * env * volume
 
