@@ -987,9 +987,22 @@ def parse_mml_source(
     *,
     dialect: str = "ppmck",
     max_repeat: int = 2,
+    pyxel_multipart: bool = False,
 ) -> list[ParsedMMLTrack]:
     default_config = default_config or SynthConfig()
     if dialect.lower() == "pyxel":
+        if pyxel_multipart:
+            parts = split_pyxel_multipart_lines(text)
+            if not parts:
+                raise ValueError("Pyxelマルチパートとして解釈できるMML行がありません")
+            return [
+                ParsedMMLTrack(
+                    channel=str(index),
+                    events=parse_pyxel_mml(part, default_config, max_repeat=max_repeat),
+                    synth_overrides={},
+                )
+                for index, part in enumerate(parts, start=1)
+            ]
         return [
             ParsedMMLTrack(
                 channel="",
@@ -1019,6 +1032,18 @@ def parse_mml_source(
             )
         )
     return tracks
+
+
+def split_pyxel_multipart_lines(text: str) -> list[str]:
+    parts: list[str] = []
+    for raw_line in text.splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith(";"):
+            continue
+        if line.lower().startswith(("http://", "https://")):
+            continue
+        parts.append(line)
+    return parts
 
 
 def mml_apply_gate(full_duration: float, state: MMLState) -> tuple[float, float]:
@@ -1599,34 +1624,34 @@ def parse_pyxel_mml(
     compact = expand_pyxel_repeats(compact, max_repeat)
 
     tie_pending = False
-    tie_extra_duration = 0.0
     legato_pending = False
     last_pitched_event: NoteEvent | None = None
     last_gate_rest: NoteEvent | None = None
     last_pitched_full_duration = 0.0
     last_pitched_frequency: float | None = None
+    last_extend_kind: str | None = None
+    last_rest_event: NoteEvent | None = None
 
     def emit_rest(full_duration: float) -> None:
-        nonlocal tie_pending, tie_extra_duration, legato_pending
+        nonlocal tie_pending, legato_pending, last_extend_kind, last_rest_event
         tie_pending = False
-        tie_extra_duration = 0.0
         legato_pending = False
-        events.append(
-            make_pyxel_note_event(
-                state=state,
-                default_config=default_config,
-                duration=full_duration,
-                frequency=None,
-            )
+        rest_event = make_pyxel_note_event(
+            state=state,
+            default_config=default_config,
+            duration=full_duration,
+            frequency=None,
         )
+        events.append(rest_event)
+        last_extend_kind = "rest"
+        last_rest_event = rest_event
 
     def emit_pitched(full_duration: float, frequency: float) -> None:
-        nonlocal tie_pending, tie_extra_duration, legato_pending
+        nonlocal tie_pending, legato_pending, last_extend_kind, last_rest_event
         nonlocal last_pitched_event, last_gate_rest, last_pitched_full_duration
         nonlocal last_pitched_frequency
 
-        effective_duration = full_duration + tie_extra_duration
-        tie_extra_duration = 0.0
+        effective_duration = full_duration
 
         if tie_pending and last_pitched_event is not None:
             if math.isclose(last_pitched_frequency or 0.0, frequency, rel_tol=0.0, abs_tol=1e-6):
@@ -1675,6 +1700,8 @@ def parse_pyxel_mml(
                 last_pitched_frequency = frequency
             tie_pending = False
             legato_pending = False
+            last_extend_kind = "pitched"
+            last_rest_event = None
             return
 
         if tie_pending:
@@ -1703,6 +1730,8 @@ def parse_pyxel_mml(
             events.append(last_gate_rest)
         tie_pending = False
         legato_pending = False
+        last_extend_kind = "pitched"
+        last_rest_event = None
 
     pos = 0
     while pos < len(compact):
@@ -1715,8 +1744,26 @@ def parse_pyxel_mml(
 
         if match.group("tie_ext"):
             length = int(match.group("tie_ext")[1:])
-            tie_extra_duration += pyxel_length_to_seconds(length, 0, state.tempo)
-            tie_pending = True
+            extra_duration = pyxel_length_to_seconds(length, 0, state.tempo)
+            if last_extend_kind == "pitched" and last_pitched_event is not None:
+                if last_gate_rest is not None and events and events[-1] is last_gate_rest:
+                    events.pop()
+                last_pitched_full_duration += extra_duration
+                sound, rest = pyxel_apply_gate(last_pitched_full_duration, state.gate_percent)
+                last_pitched_event.duration = sound
+                last_gate_rest = None
+                if rest > 0:
+                    last_gate_rest = make_pyxel_note_event(
+                        state=state,
+                        default_config=default_config,
+                        duration=rest,
+                        frequency=None,
+                    )
+                    events.append(last_gate_rest)
+            elif last_extend_kind == "rest" and last_rest_event is not None:
+                last_rest_event.duration += extra_duration
+            else:
+                raise ValueError("Pyxelの &<length> の前に音符または休符が必要です")
             continue
 
         if match.group("tie"):
@@ -2367,6 +2414,7 @@ def _mml_kwargs_from_args(args: argparse.Namespace) -> dict[str, object]:
     return {
         "dialect": getattr(args, "mml_dialect", "ppmck"),
         "max_repeat": getattr(args, "max_repeat", PYXEL_DEFAULT_MAX_REPEAT),
+        "pyxel_multipart": getattr(args, "pyxel_multipart", False),
     }
 
 
@@ -2440,7 +2488,12 @@ def parse_track_text(
     if fmt == "abc":
         return parse_abc(text, config)
     if args is not None:
-        return parse_mml_by_dialect(text, config, **_mml_kwargs_from_args(args))
+        return parse_mml_by_dialect(
+            text,
+            config,
+            dialect=getattr(args, "mml_dialect", "ppmck"),
+            max_repeat=getattr(args, "max_repeat", PYXEL_DEFAULT_MAX_REPEAT),
+        )
     return parse_mml(text, config)
 
 
@@ -2484,6 +2537,11 @@ def create_parser() -> argparse.ArgumentParser:
         "--pyxel-compat-report",
         action="store_true",
         help="Pyxel 方言で非推奨・未対応トークンの警告を stderr に出力",
+    )
+    parser.add_argument(
+        "--pyxel-multipart",
+        action="store_true",
+        help="Pyxel 方言の入力を1行1パートとして同時演奏（空行・コメント行・共有URLは除外）",
     )
     parser.add_argument("--preset", "-p", choices=sorted(SFX_PRESETS), help="内蔵 SFX プリセット")
     parser.add_argument(
@@ -2631,6 +2689,8 @@ def main(argv: Sequence[str] | None = None) -> int:
     try:
         if args.max_repeat < 1:
             raise ValueError("--max-repeat は正の整数を指定してください")
+        if args.pyxel_multipart and args.mml_dialect != "pyxel":
+            raise ValueError("--pyxel-multipart は --mml-dialect pyxel と併用してください")
 
         config = build_config_from_args(args)
         input_text = read_input_text(args)

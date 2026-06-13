@@ -82,7 +82,9 @@ python tools/sound/sfx_generator.py --preset coin --play
 python tools/sound/sfx_generator.py --input-file scores/tulip.abc --format abc --style sine -o tulip
 python tools/sound/sfx_generator.py --input-file melody.abc --format abc --track-file bass.abc -o duet
 python tools/sound/sfx_generator.py --mml-dialect pyxel --input-file scores/pyxel_core_sample.mml -o output/pyxel/core_sample
+python tools/sound/sfx_generator.py --mml-dialect pyxel --pyxel-multipart --input-file scores/pyxel_composer_sample.mml -o output/pyxel/composer_sample
 python tools/sound/sfx_generator.py --mml-dialect pyxel --max-repeat 4 --input-file scores/pyxel_repeat_sample.mml -o output/pyxel/repeat
+python tools/sound/sfx_generator.py --mml-dialect pyxel --pyxel-multipart --input-file MML.txt -o output/pyxel/composer-preview
 python -m unittest discover -s tests -v
 ```
 
@@ -102,6 +104,8 @@ python tools/sound/sfx_generator.py --mml-dialect pyxel --pyxel-compat-report --
 ```
 
 4 パート合奏は MML をファイル分割し、Pyxel 側で `Music.set` 用に Sound を束ねる。PPMCK の `A`〜`E` 宣言を 1 本へマージする機能はない。
+
+Pyxel Composerなどの「1行につき1パート」のテキストは、`--pyxel-multipart` で全行を同時演奏する。空行、`;` コメント行、共有URL行は除外される。通常の改行入り単一パートMMLでは指定しない。
 
 ## Porting to another project
 

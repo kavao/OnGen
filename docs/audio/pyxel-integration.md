@@ -19,6 +19,7 @@ python tools/sound/sfx_generator.py \
 | `--mml-dialect` | `ppmck` | `pyxel` で Pyxel 2.4+ パーサーを使用 |
 | `--max-repeat` | `2` | Pyxel の回数省略リピート `[...]` を何回展開するか（正の整数のみ） |
 | `--pyxel-compat-report` | オフ | PPMCK 固有トークンなど非対応候補を stderr に列挙 |
+| `--pyxel-multipart` | オフ | 1行を1パートとして解釈し、複数パートを同時演奏 |
 
 `Q`（ゲート％）や `V`（0〜127）など、同名でも意味が異なるコマンドは方言ごとに分岐します。詳細は [MMLリファレンス](mml-reference.md#pyxel-方言) を参照してください。
 
@@ -67,6 +68,22 @@ OnGen 側の対応例:
 
 PPMCK の `A`〜`E` トラック宣言を 1 本の Pyxel MML へ自動マージする機能はありません（API 設計が異なるため）。
 
+### 1ファイルのマルチパートを試聴する
+
+Pyxel Composerなどが出力する「1行につき1パート」のテキストは、`--pyxel-multipart` で同時演奏できます。空行、`;` で始まるコメント行、`http://` または `https://` で始まる共有URLはパートから除外されます。
+
+マルチパートのテキストをWAVへ変換します。
+
+```bash
+python tools/sound/sfx_generator.py \
+  --mml-dialect pyxel \
+  --pyxel-multipart \
+  --input-file scores/pyxel_composer_sample.mml \
+  -o output/pyxel/composer-preview
+```
+
+実行後、`output/pyxel/composer-preview.wav` に全パートをミックスした音声が保存されます。通常の改行入り単一パートMMLは、`--pyxel-multipart` を付けずに使用します。
+
 ## 非対応・注意点
 
 - PPMCK 流の `N32`（直接ノート番号）、`%` / `*` / `W()`、トラック宣言 `A`〜`E` は Pyxel 方言では使えません。
@@ -88,4 +105,4 @@ python tools/sound/sfx_generator.py \
 
 - 計画正本: `_workingspace/plans/pyxel-mml-compatibility-plan.md`
 - Pyxel 公式 MML: https://github.com/kitao/pyxel/blob/main/docs/mml-commands.md
-- フィクスチャ: `scores/pyxel_*.mml`
+- フィクスチャ: `scores/pyxel_*.mml`、`scores/pyxel_composer_sample.mml`（4パート・`--pyxel-multipart`）

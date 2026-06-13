@@ -36,6 +36,9 @@ python tools/sound/sfx_generator.py --input-file path/to/your_score.abc --format
 | `ode_to_joy_melody.abc` + `ode_to_joy_bass.abc` | 二重奏サンプル |
 | `scores/ppmck_phase2_sample.mml` | フェーズ2互換（Q/K/N）の検証用 |
 | `scores/ppmck_phase3_sample.mml` | フェーズ3互換（A〜E トラック宣言）の検証用 |
+| `scores/eine_kleine_nachtmusik_sample.mml` | モーツァルト（アレグロ冒頭 mm.1〜4、A/C 二声） |
+| `scores/pyxel_*.mml` | Pyxel 方言の短尺フィクスチャ |
+| `scores/pyxel_composer_sample.mml` | Pyxel Composer 由来の4パート曲（権利フリー） |
 | `canon_in_d_*.mml` | 3 トラックのカノン |
 | `fur_elise_fast_sample.abc` | 短い音符・休符のタイミング確認 |
 
@@ -85,6 +88,17 @@ C2 G2 E2
 python tools/sound/sfx_generator.py --input-file scores/ppmck_phase3_sample.mml -o output/bgm/ppmck_phase3
 ```
 
+### 実在曲サンプル（モーツァルト）
+
+`scores/eine_kleine_nachtmusik_sample.mml` は『アイネ・クライネ・ナハトムジーク』第1楽章アレグロの冒頭 **4小節のみ** です。P.D. 編曲の PPMCK 形式を OnGen 向けに収録しています（`T180` `K-7`、トラック A=メロディ、C=和声）。
+
+```bash
+python tools/sound/sfx_generator.py --input-file scores/eine_kleine_nachtmusik_sample.mml -o output/bgm/eine_kleine_nachtmusik_sample
+python tools/sound/sfx_generator.py --input-file scores/eine_kleine_nachtmusik_sample.mml -o output/bgm/eine_kleine_nachtmusik_sample --play
+```
+
+成功時は約 5 秒のミックス WAV が生成されます。
+
 ### CLI の `--track` / `--track-file`
 
 別ファイルや追加パートを重ねる場合は従来どおり CLI フラグを使います。
@@ -100,6 +114,33 @@ python tools/sound/sfx_generator.py --input-file scores/canon_in_d_bass.mml --tr
 ```
 
 `--track-style` は、MML内トラックではなく `--track` / `--track-file` の順に波形（square/sawtooth/triangle/sine/noise）を上書きします。ADSR・FM・LFO は全トラック共通です。
+
+## Pyxel Composer 4パート曲
+
+`scores/pyxel_composer_sample.mml` は Pyxel MML Studio 由来の権利フリー楽譜です。1行が1パート（メロディ・和声・コード・打撃）になっています。4パートをまとめて試聴するときは `--pyxel-multipart` を付けます。
+
+```bash
+python tools/sound/sfx_generator.py \
+  --mml-dialect pyxel \
+  --pyxel-multipart \
+  --input-file scores/pyxel_composer_sample.mml \
+  -o output/bgm/pyxel_composer_sample
+```
+
+`ffplay` が使える環境では、その場再生もできます。
+
+```bash
+python tools/sound/sfx_generator.py \
+  --mml-dialect pyxel \
+  --pyxel-multipart \
+  --input-file scores/pyxel_composer_sample.mml \
+  -o output/bgm/pyxel_composer_sample \
+  --play
+```
+
+成功時は約 32 秒の WAV が `output/bgm/pyxel_composer_sample.wav` に保存されます。ファイル末尾の MML Studio 共有 URL はパース時に自動で除外されます。
+
+1パートだけ聞く場合は、該当行だけを `--input` に渡すか、行を抜き出した小さな `.mml` を別途用意してください（`--pyxel-multipart` は付けません）。
 
 ## MML の書き方
 

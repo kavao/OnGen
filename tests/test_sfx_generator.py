@@ -681,6 +681,40 @@ class MmlPhase3CompatTests(unittest.TestCase):
             self.assertGreater(audio.size, 0)
 
 
+class EineKleineNachtmusikBenchmarkTests(unittest.TestCase):
+    def test_eine_kleine_nachtmusik_sample_score(self) -> None:
+        tracks = parse_mml_source(
+            (ROOT / "scores" / "eine_kleine_nachtmusik_sample.mml").read_text(encoding="utf-8")
+        )
+        self.assertEqual([track.channel for track in tracks], ["A", "C"])
+        by_channel = {track.channel: track for track in tracks}
+        a_pitched = [event for event in by_channel["A"].events if event.frequency is not None]
+        c_pitched = [event for event in by_channel["C"].events if event.frequency is not None]
+        self.assertEqual(len(a_pitched), 18)
+        self.assertEqual(len(c_pitched), 12)
+        self.assertAlmostEqual(a_pitched[0].frequency, note_name_to_freq("C", 4))
+        self.assertAlmostEqual(
+            sum(event.duration for event in by_channel["A"].events),
+            sum(event.duration for event in by_channel["C"].events),
+            places=3,
+        )
+
+    def test_eine_kleine_nachtmusik_cli_generates_wav(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            output = str(Path(tmpdir) / "nachtmusik")
+            result = main(
+                [
+                    "--input-file",
+                    str(ROOT / "scores" / "eine_kleine_nachtmusik_sample.mml"),
+                    "-o",
+                    output,
+                ]
+            )
+            self.assertEqual(result, 0)
+            rate, audio = wavfile.read(f"{output}.wav")
+            self.assertAlmostEqual(audio.size / rate, 5.33, delta=0.5)
+
+
 class MmlPyxelCompatTests(unittest.TestCase):
     def test_q_gate_percent_inserts_rest(self) -> None:
         events = parse_pyxel_mml("T120 Q50 @1 O4 L8 C4")
@@ -715,6 +749,31 @@ class MmlPyxelCompatTests(unittest.TestCase):
         pitched = [event for event in events if event.frequency is not None]
         self.assertEqual(len(pitched), 1)
         self.assertAlmostEqual(pitched[0].duration, quarter * 1.5)
+
+    def test_length_only_tie_extends_previous_note(self) -> None:
+        events = parse_pyxel_mml("T120 Q100 L16 C16&16 D16")
+        pitched = [event for event in events if event.frequency is not None]
+        self.assertEqual(len(pitched), 2)
+        self.assertAlmostEqual(pitched[0].duration, 0.25)
+        self.assertAlmostEqual(pitched[1].duration, 0.125)
+
+    def test_length_only_tie_extends_previous_rest(self) -> None:
+        events = parse_pyxel_mml("T120 Q100 L16 R16&16 C16")
+        self.assertIsNone(events[0].frequency)
+        self.assertAlmostEqual(events[0].duration, 0.25)
+        self.assertAlmostEqual(events[1].duration, 0.125)
+
+    def test_chained_length_only_ties_extend_previous_note(self) -> None:
+        events = parse_pyxel_mml("T120 Q100 L16 C16&16&16&16 D16")
+        pitched = [event for event in events if event.frequency is not None]
+        self.assertAlmostEqual(pitched[0].duration, 0.5)
+        self.assertAlmostEqual(pitched[1].duration, 0.125)
+
+    def test_length_only_tie_recalculates_gate(self) -> None:
+        events = parse_pyxel_mml("T120 Q50 L16 C16&16 D16")
+        self.assertAlmostEqual(events[0].duration, 0.125)
+        self.assertIsNone(events[1].frequency)
+        self.assertAlmostEqual(events[1].duration, 0.125)
 
     def test_implicit_repeat_uses_max_repeat(self) -> None:
         events = parse_pyxel_mml("T120 @1 O4 L8 [C4 D4]", max_repeat=3)
@@ -827,6 +886,81 @@ class MmlPyxelCompatTests(unittest.TestCase):
             )
             self.assertEqual(result, 0)
             self.assertTrue(Path(f"{output}.wav").exists())
+
+    def test_pyxel_multiline_stays_single_part_by_default(self) -> None:
+        tracks = parse_mml_source(
+            "T120 Q100 O4 C4\nD4",
+            dialect="pyxel",
+        )
+        self.assertEqual(len(tracks), 1)
+        self.assertEqual(len([e for e in tracks[0].events if e.frequency is not None]), 2)
+
+    def test_pyxel_multipart_uses_each_mml_line_and_ignores_share_url(self) -> None:
+        tracks = parse_mml_source(
+            "T120 Q100 O4 C4\n"
+            "T120 Q100 O3 G4\n"
+            "\n"
+            "; exported by composer\n"
+            "https://example.com/share",
+            dialect="pyxel",
+            pyxel_multipart=True,
+        )
+        self.assertEqual(len(tracks), 2)
+        self.assertEqual([track.channel for track in tracks], ["1", "2"])
+
+    def test_cli_pyxel_multipart_composer_file_generates_wav(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            output = str(Path(tmpdir) / "pyxel_multipart")
+            source = Path(tmpdir) / "composer.txt"
+            source.write_text(
+                "T120 Q100 O4 C4\nT120 Q100 O3 G4\n\nhttps://example.com/share\n",
+                encoding="utf-8",
+            )
+            result = main(
+                [
+                    "--mml-dialect",
+                    "pyxel",
+                    "--pyxel-multipart",
+                    "--input-file",
+                    str(source),
+                    "-o",
+                    output,
+                ]
+            )
+            self.assertEqual(result, 0)
+            rate, audio = wavfile.read(f"{output}.wav")
+            self.assertAlmostEqual(audio.size / rate, 0.5, places=2)
+
+    def test_cli_pyxel_multipart_requires_pyxel_dialect(self) -> None:
+        result = main(["--pyxel-multipart", "--input", "C4"])
+        self.assertEqual(result, 1)
+
+    def test_pyxel_composer_sample_score(self) -> None:
+        text = (ROOT / "scores" / "pyxel_composer_sample.mml").read_text(encoding="utf-8")
+        tracks = parse_mml_source(text, dialect="pyxel", pyxel_multipart=True)
+        self.assertEqual(len(tracks), 4)
+        self.assertEqual([track.channel for track in tracks], ["1", "2", "3", "4"])
+        for track in tracks:
+            pitched = [event for event in track.events if event.frequency is not None]
+            self.assertGreater(len(pitched), 8)
+
+    def test_cli_pyxel_composer_sample_generates_wav(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            output = str(Path(tmpdir) / "pyxel_composer_sample")
+            result = main(
+                [
+                    "--mml-dialect",
+                    "pyxel",
+                    "--pyxel-multipart",
+                    "--input-file",
+                    str(ROOT / "scores" / "pyxel_composer_sample.mml"),
+                    "-o",
+                    output,
+                ]
+            )
+            self.assertEqual(result, 0)
+            rate, audio = wavfile.read(f"{output}.wav")
+            self.assertAlmostEqual(audio.size / rate, 32.0, delta=1.0)
 
     def test_detune_y_shifts_frequency(self) -> None:
         base = parse_pyxel_mml("T120 Q100 @1 O4 L8 C4")[0].frequency
