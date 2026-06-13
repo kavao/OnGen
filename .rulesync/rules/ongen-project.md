@@ -7,29 +7,32 @@ description: "OnGenプロジェクト固有の目的・正本・検証ルール"
 
 ## Project goals
 
-- `sfx_generator.py` を、単体で別プロジェクトへ持ち込める効果音・BGM生成ツールとして維持する。
-- ユーザー向け正式名称は `OnGen` とする。CLIファイル名 `sfx_generator.py` と既存パス名は互換性のため維持する。
+- `tools/sound/sfx_generator.py` を、単体で別プロジェクトへ持ち込める効果音・BGM生成ツールとして維持する。
+- ユーザー向け正式名称は `OnGen` とする。
 - OnGenはMIT Licenseで公開する。ライセンス正本はルートの`LICENSE`とする。
 - Rulesyncの `audio-generation` スキルから、プリセット、MML、ABC、複数トラック生成を再利用できる状態にする。
 - MMLは音符ごとの音長指定（`c4`等）と相対オクターブ変更（`>` / `<`）をPPMCK / MCK流に統一済みとする。
 
 ## Sources of truth
 
-- 音源生成実装: `sfx_generator.py`
-- 動作仕様と利用例: `README.md`
+- 音源生成実装: `tools/sound/sfx_generator.py`
+- 人間向け操作説明: `docs/audio/`（入口は `docs/README.md`、短い代表例は `README.md`）
+- MML仕様（人間向け）: `docs/audio/mml-reference.md`
+- 外部スキル取り込み（人間向け）: `docs/skills/importing-external-skills.md`
+- LLM向け作業手順: `.rulesync/skills/`
 - 再生成可能な楽譜: `scores/`
-- 回帰検証: `tests/test_sfx_generator.py`
+- 回帰検証: `tests/test_sfx_generator.py`, `tests/test_sfx_generator_portability.py`
 - 目標とロードマップ: `_workingspace/plans/`
 
 ## Required verification
 
-- `sfx_generator.py` の変更後は `python -m unittest discover -s tests -v` を実行する。
+- `tools/sound/sfx_generator.py` の変更後は `python -m unittest discover -s tests -v` を実行する。
 - 楽曲スコアの変更時は、音程・音価を固定する回帰テストを追加または更新する。
 - 出力確認用音声は `output/` に生成し、正本として扱わない。
-- `sfx_generator.py` の単体可搬性を壊すプロジェクト内モジュール依存を追加しない。
+- `tools/sound/sfx_generator.py` の単体可搬性を壊すプロジェクト内モジュール依存を追加しない。
 
 ## MML compatibility
 
 - 音符直後の数字はPPMCK / MCKと同じく音長を表す。オクターブは`O`コマンドおよび相対オクターブ変更`>` / `<`で指定する（旧来の「数字=オクターブ」解釈には戻さない）。
 - この移行は破壊的変更として直接適用済みであり、既存のプリセット・スコア・ドキュメントは新表記に統一する。
-- 対応状況と非互換点はREADMEと `_workingspace/plans/mml-compatibility-roadmap.md` に反映する。
+- 対応状況と非互換点は `docs/audio/mml-reference.md` と `_workingspace/plans/mml-compatibility-roadmap.md` に反映する。

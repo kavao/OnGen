@@ -1,4 +1,6 @@
+import importlib.util
 import math
+import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -7,35 +9,46 @@ from unittest.mock import patch
 import numpy as np
 from scipy.io import wavfile
 
-from sfx_generator import (
-    ADSR,
-    FMConfig,
-    FM_TONE_PRESETS,
-    LFOConfig,
-    MIX_HEADROOM,
-    NoteEvent,
-    SFX_PRESETS,
-    SynthConfig,
-    abc_default_unit_from_meter,
-    abc_length_multiplier,
-    abc_quarter_note_tempo,
-    apply_master_fade,
-    apply_audio_filter,
-    create_parser,
-    generate_colored_noise,
-    main,
-    mix_tracks,
-    load_preset,
-    note_name_to_freq,
-    parse_abc,
-    parse_mml,
-    play_audio,
-    synthesize_note,
-    synthesize_sequence,
-)
-
-
 ROOT = Path(__file__).resolve().parents[1]
+CANONICAL_PATH = ROOT / "tools" / "sound" / "sfx_generator.py"
+
+
+def _load_canonical():
+    spec = importlib.util.spec_from_file_location("ongen_sound_sfx_generator", CANONICAL_PATH)
+    if spec is None or spec.loader is None:
+        raise ImportError(f"正本を読み込めません: {CANONICAL_PATH}")
+    module = importlib.util.module_from_spec(spec)
+    sys.modules["ongen_sound_sfx_generator"] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+sg = _load_canonical()
+
+ADSR = sg.ADSR
+FMConfig = sg.FMConfig
+FM_TONE_PRESETS = sg.FM_TONE_PRESETS
+LFOConfig = sg.LFOConfig
+MIX_HEADROOM = sg.MIX_HEADROOM
+NoteEvent = sg.NoteEvent
+SFX_PRESETS = sg.SFX_PRESETS
+SynthConfig = sg.SynthConfig
+abc_default_unit_from_meter = sg.abc_default_unit_from_meter
+abc_length_multiplier = sg.abc_length_multiplier
+abc_quarter_note_tempo = sg.abc_quarter_note_tempo
+apply_master_fade = sg.apply_master_fade
+apply_audio_filter = sg.apply_audio_filter
+create_parser = sg.create_parser
+generate_colored_noise = sg.generate_colored_noise
+main = sg.main
+mix_tracks = sg.mix_tracks
+load_preset = sg.load_preset
+note_name_to_freq = sg.note_name_to_freq
+parse_abc = sg.parse_abc
+parse_mml = sg.parse_mml
+play_audio = sg.play_audio
+synthesize_note = sg.synthesize_note
+synthesize_sequence = sg.synthesize_sequence
 
 
 class PitchTests(unittest.TestCase):
@@ -173,7 +186,7 @@ class PlaybackTests(unittest.TestCase):
     def test_play_reports_error_when_ffplay_missing(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             output = str(Path(tmpdir) / "play_sample")
-            with patch("sfx_generator.which", return_value=None):
+            with patch.object(sg, "which", return_value=None):
                 exit_code = main(
                     ["--input", "O4 L4 T120 C", "--play", "-o", output]
                 )
@@ -186,7 +199,8 @@ class PlaybackTests(unittest.TestCase):
             fake_result = type(
                 "Result", (), {"returncode": 1, "stderr": "boom", "stdout": ""}
             )()
-            with patch("sfx_generator.subprocess.run", return_value=fake_result):
+            with patch.object(sg, "subprocess") as mock_subprocess:
+                mock_subprocess.run.return_value = fake_result
                 with self.assertRaises(RuntimeError):
                     play_audio(wav_path)
 
