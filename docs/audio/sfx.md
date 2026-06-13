@@ -32,6 +32,42 @@ python tools/sound/sfx_generator.py --preset coin --play
 
 実行後、既定では `output/` 配下に WAV が保存されます。
 
+## MML で効果音を書く
+
+**書けます。** 内蔵プリセット（`jump` / `coin` など）も中身は MML です。MML だけで決まるのは主に次の要素です。
+
+| MML で指定できる | 例 |
+|-----------------|-----|
+| 音程・リズム | `O4 L16 C E G >C`、`R8` |
+| テンポ・音量 | `T240`、`V15` |
+| 波形（`@`） | `@2` 矩形25%、`@6` サイン、`@7` ノイズ |
+| FM / LFO | `%10`（変調指数）、`*4`（倍率÷2）、`~6`（LFO深度） |
+| ノイズチャンネル | トラック `D` / `E`（白ノイズ） |
+| 複数レイヤー | `A` + `D` で胴とクリックを同時ミックス |
+
+**MML だけでは指定できない**（CLI かプリセットの `SynthConfig` が必要）: フィルター種別・カットオフ、ノイズ色（pink / brown）、ADSR の細かい秒数。打撃・爆発を `--input-file` だけで作る場合はチャンネル `D` のノイズ＋短い音長が現実的な落としどころです。よりリッチにするには `--filter` `--decay` 等を併用するか、`--preset hit` を使います。
+
+### 収録サンプル（`scores/sfx_*_sample.mml`）
+
+| ファイル | 内容 |
+|---------|------|
+| `sfx_jump_sample.mml` | 上昇ジャンプ（矩形波） |
+| `sfx_coin_sample.mml` | コイン取得（サイン＋FM） |
+| `sfx_hit_sample.mml` | 打撃（D チャンネル・ノイズ） |
+| `sfx_laser_sample.mml` | 下降レーザー（のこぎり＋FM＋LFO） |
+| `sfx_ui_sample.mml` | UI 選択→決定（1 トラック連続） |
+| `sfx_kick_sample.mml` | キック風（A=胴、D=クリックの2トラック） |
+| `sfx_explosion_sample.mml` | 爆発（衝撃＋ノイズ尾の3トラック） |
+
+```bash
+python tools/sound/sfx_generator.py --input-file scores/sfx_jump_sample.mml -o output/sfx/jump
+python tools/sound/sfx_generator.py --input-file scores/sfx_kick_sample.mml -o output/sfx/kick
+python tools/sound/sfx_generator.py --input-file scores/sfx_hit_sample.mml --filter highpass --cutoff 900 --decay 0.06 -o output/sfx/hit_rich
+python tools/sound/sfx_generator.py --input-file scores/sfx_explosion_sample.mml --noise-color brown --filter lowpass --cutoff 2000 --attack 0.001 --decay 0.35 --sustain 0.05 --release 0.3 --fade-in 0 -o output/sfx/explosion
+```
+
+MML コマンドの詳細は [MMLリファレンス](mml-reference.md) を参照してください。
+
 ## よく使う CLI オプション
 
 | オプション | 説明 | 例 |

@@ -681,6 +681,113 @@ class MmlPhase3CompatTests(unittest.TestCase):
             self.assertGreater(audio.size, 0)
 
 
+class SfxMmlSampleTests(unittest.TestCase):
+    SFX_SAMPLES: list[tuple[str, int, str | None]] = [
+        ("sfx_jump_sample.mml", 4, "square"),
+        ("sfx_coin_sample.mml", 3, "sine"),
+        ("sfx_laser_sample.mml", 6, "sawtooth"),
+        ("sfx_ui_sample.mml", 5, "sine"),
+    ]
+
+    def test_sfx_sample_scores_parse_and_render(self) -> None:
+        for filename, min_pitched, expected_waveform in self.SFX_SAMPLES:
+            with self.subTest(filename=filename):
+                text = (ROOT / "scores" / filename).read_text(encoding="utf-8")
+                tracks = parse_mml_source(text)
+                pitched = [
+                    event
+                    for track in tracks
+                    for event in track.events
+                    if event.frequency is not None
+                ]
+                self.assertGreaterEqual(len(pitched), min_pitched)
+                self.assertEqual(pitched[0].waveform, expected_waveform)
+                audio = synthesize_sequence(pitched, SynthConfig())
+                self.assertGreater(audio.size, 0)
+                self.assertLessEqual(np.max(np.abs(audio)), MIX_HEADROOM)
+
+    def test_sfx_hit_sample_uses_noise_channel(self) -> None:
+        tracks = parse_mml_source(
+            (ROOT / "scores" / "sfx_hit_sample.mml").read_text(encoding="utf-8")
+        )
+        self.assertEqual([track.channel for track in tracks], ["D"])
+        pitched = [event for event in tracks[0].events if event.frequency is not None]
+        self.assertEqual(len(pitched), 1)
+        self.assertEqual(pitched[0].waveform, "noise")
+
+    def test_sfx_kick_sample_mixes_body_and_click(self) -> None:
+        tracks = parse_mml_source(
+            (ROOT / "scores" / "sfx_kick_sample.mml").read_text(encoding="utf-8")
+        )
+        self.assertEqual([track.channel for track in tracks], ["A", "D"])
+        by_channel = {track.channel: track for track in tracks}
+        body = [event for event in by_channel["A"].events if event.frequency is not None][0]
+        click = [event for event in by_channel["D"].events if event.frequency is not None][0]
+        self.assertEqual(body.waveform, "sine")
+        self.assertEqual(click.waveform, "noise")
+        self.assertGreater(body.duration, click.duration)
+
+    def test_sfx_explosion_sample_layers_impact_and_noise_tail(self) -> None:
+        tracks = parse_mml_source(
+            (ROOT / "scores" / "sfx_explosion_sample.mml").read_text(encoding="utf-8")
+        )
+        self.assertEqual([track.channel for track in tracks], ["A", "B", "D"])
+        by_channel = {track.channel: track for track in tracks}
+        impact = [event for event in by_channel["A"].events if event.frequency is not None][0]
+        crackle = [event for event in by_channel["B"].events if event.frequency is not None][0]
+        tail = [event for event in by_channel["D"].events if event.frequency is not None][0]
+        self.assertEqual(impact.waveform, "square")
+        self.assertEqual(crackle.waveform, "square")
+        self.assertEqual(tail.waveform, "noise")
+        self.assertLess(impact.duration, crackle.duration)
+        self.assertLess(crackle.duration, tail.duration)
+        self.assertAlmostEqual(tail.duration, 1.2, places=2)
+
+    def test_cli_sfx_explosion_sample_generates_wav(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            out = Path(tmp) / "explosion"
+            argv = [
+                "sfx_generator.py",
+                "--input-file",
+                str(ROOT / "scores" / "sfx_explosion_sample.mml"),
+                "--noise-color",
+                "brown",
+                "--filter",
+                "lowpass",
+                "--cutoff",
+                "2000",
+                "--attack",
+                "0.001",
+                "--decay",
+                "0.35",
+                "--sustain",
+                "0.05",
+                "--release",
+                "0.3",
+                "--fade-in",
+                "0",
+                "-o",
+                str(out),
+            ]
+            with patch.object(sys, "argv", argv):
+                main()
+            wav_path = out.with_suffix(".wav")
+            self.assertTrue(wav_path.exists())
+            rate, audio = wavfile.read(wav_path)
+            self.assertGreater(audio.size, 0)
+            self.assertAlmostEqual(audio.size / rate, 1.2, delta=0.15)
+
+    def test_cli_sfx_jump_sample_generates_wav(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            out = Path(tmp) / "jump"
+            with patch.object(sys, "argv", ["sfx_generator.py", "--input-file", str(ROOT / "scores" / "sfx_jump_sample.mml"), "-o", str(out)]):
+                main()
+            wav_path = out.with_suffix(".wav")
+            self.assertTrue(wav_path.exists())
+            _, audio = wavfile.read(wav_path)
+            self.assertGreater(audio.size, 0)
+
+
 class EineKleineNachtmusikBenchmarkTests(unittest.TestCase):
     def test_eine_kleine_nachtmusik_sample_score(self) -> None:
         tracks = parse_mml_source(

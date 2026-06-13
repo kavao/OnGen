@@ -1,0 +1,2 @@
+; UI — select (short) then confirm (arpeggio), single track
+T300 @6 V11 O6 L32 C R16 V13 O5 L16 C E G >C

@@ -1,0 +1,2 @@
+; Hit — short noise burst on PPMCK channel D
+D T240 L16 V15 O4 C

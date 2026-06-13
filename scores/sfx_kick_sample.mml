@@ -1,0 +1,4 @@
+; Synthetic kick — sine body (A) + noise click (D), mixed from t=0
+T240
+A @6 O2 L8 V15 C
+D O5 L32 V10 C

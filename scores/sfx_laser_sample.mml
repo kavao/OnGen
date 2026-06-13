@@ -1,0 +1,2 @@
+; Laser — descending sawtooth with FM and LFO
+T300 L32 V13 @5 %8 *5 ~6 O7 C <B G E C <G

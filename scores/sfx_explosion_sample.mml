@@ -1,0 +1,5 @@
+; Explosion — impact pulse, crackle, and noise tail
+T100
+A @2 O2 L32 V15 C
+B @3 O4 L16 V11 C
+D O3 L2 V14 C

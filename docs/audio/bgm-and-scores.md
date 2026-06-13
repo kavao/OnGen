@@ -39,6 +39,7 @@ python tools/sound/sfx_generator.py --input-file path/to/your_score.abc --format
 | `scores/eine_kleine_nachtmusik_sample.mml` | モーツァルト（アレグロ冒頭 mm.1〜4、A/C 二声） |
 | `scores/pyxel_*.mml` | Pyxel 方言の短尺フィクスチャ |
 | `scores/pyxel_composer_sample.mml` | Pyxel Composer 由来の4パート曲（権利フリー） |
+| `scores/sfx_*_sample.mml` | MML 効果音サンプル（ジャンプ・コイン・打撃・UI 等） |
 | `canon_in_d_*.mml` | 3 トラックのカノン |
 | `fur_elise_fast_sample.abc` | 短い音符・休符のタイミング確認 |
 
