@@ -2,6 +2,7 @@ import math
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 import numpy as np
 from scipy.io import wavfile
@@ -28,6 +29,7 @@ from sfx_generator import (
     note_name_to_freq,
     parse_abc,
     parse_mml,
+    play_audio,
     synthesize_note,
     synthesize_sequence,
 )
@@ -155,6 +157,38 @@ class TrackStyleTests(unittest.TestCase):
             self.assertEqual(exit_code, 0)
             _, audio = wavfile.read(output + ".wav")
             self.assertGreater(audio.size, 0)
+
+
+class PlaybackTests(unittest.TestCase):
+    def test_play_flag_defaults_to_false(self) -> None:
+        parser = create_parser()
+        args = parser.parse_args(["--input", "O4 L4 T120 C"])
+        self.assertFalse(args.play)
+
+    def test_play_flag_parses(self) -> None:
+        parser = create_parser()
+        args = parser.parse_args(["--input", "O4 L4 T120 C", "--play"])
+        self.assertTrue(args.play)
+
+    def test_play_reports_error_when_ffplay_missing(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            output = str(Path(tmpdir) / "play_sample")
+            with patch("sfx_generator.which", return_value=None):
+                exit_code = main(
+                    ["--input", "O4 L4 T120 C", "--play", "-o", output]
+                )
+            self.assertEqual(exit_code, 1)
+
+    def test_play_audio_raises_on_ffplay_failure(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            wav_path = Path(tmpdir) / "sample.wav"
+            wavfile.write(str(wav_path), 44100, np.zeros(10, dtype=np.int16))
+            fake_result = type(
+                "Result", (), {"returncode": 1, "stderr": "boom", "stdout": ""}
+            )()
+            with patch("sfx_generator.subprocess.run", return_value=fake_result):
+                with self.assertRaises(RuntimeError):
+                    play_audio(wav_path)
 
 
 class AbcTimingTests(unittest.TestCase):

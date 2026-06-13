@@ -585,6 +585,26 @@ def run_ffmpeg(args: list[str]) -> None:
         raise RuntimeError(f"ffmpeg 変換に失敗: {detail}")
 
 
+def ensure_ffplay() -> None:
+    if which("ffplay") is None:
+        raise RuntimeError(
+            "--play での再生には ffplay が必要です。"
+            " https://ffmpeg.org/download.html からffmpegをインストールし、PATH に追加してください。"
+        )
+
+
+def play_audio(wav_path: Path) -> None:
+    result = subprocess.run(
+        ["ffplay", "-nodisp", "-autoexit", "-loglevel", "error", str(wav_path)],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if result.returncode != 0:
+        detail = result.stderr.strip() or result.stdout.strip() or "不明なエラー"
+        raise RuntimeError(f"ffplay 再生に失敗: {detail}")
+
+
 def export_mp3_from_wav(wav_path: Path, mp3_path: Path, bitrate: int) -> None:
     mp3_path.parent.mkdir(parents=True, exist_ok=True)
     run_ffmpeg(
@@ -1513,6 +1533,11 @@ def create_parser() -> argparse.ArgumentParser:
         help="合成音に重ねる WAV。形式: path[:offset秒[:gain]]",
     )
     parser.add_argument("--list-presets", action="store_true", help="プリセット一覧を表示")
+    parser.add_argument(
+        "--play",
+        action="store_true",
+        help="生成した音声をその場で再生（ffplay が必要。ffmpegに同梱）",
+    )
     return parser
 
 
@@ -1568,9 +1593,26 @@ def main(argv: Sequence[str] | None = None) -> int:
             extras.append(f"track×{len(extra_tracks) + 1}")
         if args.output_format != "wav":
             extras.append(args.output_format)
+        if args.play:
+            extras.append("再生")
         suffix = f" [{', '.join(extras)}]" if extras else ""
         files_text = ", ".join(str(path) for path in written)
         print(f"出力完了: {files_text} ({duration_sec:.2f}s, {total_events} イベント){suffix}")
+
+        if args.play:
+            ensure_ffplay()
+            wav_path = next((path for path in written if path.suffix.lower() == ".wav"), None)
+            if wav_path is not None:
+                play_audio(wav_path)
+            else:
+                with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as tmp:
+                    temp_wav_path = Path(tmp.name)
+                try:
+                    write_wav(temp_wav_path, audio)
+                    play_audio(temp_wav_path)
+                finally:
+                    temp_wav_path.unlink(missing_ok=True)
+
         return 0
     except Exception as exc:
         print(f"エラー: {exc}", file=sys.stderr)

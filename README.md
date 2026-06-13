@@ -216,10 +216,20 @@ python sfx_generator.py --input-file score.abc --format abc -o out.wav
 | `--cutoff` | フィルターのカットオフ周波数 Hz | `--cutoff 2000` |
 | `--fm-preset` | 2オペレーターFM音色 | `bell`, `e-piano`, `bass` |
 | `--preset`, `-p` | 内蔵プリセット | `-p coin` |
+| `--play` | 生成後に音声をその場で再生（ffplayが必要） | `--play` |
 
 矩形波は既定で PolyBLEP アンチエイリアス処理され、耳障りな折り返しノイズを抑えます。複数トラックのミックス時には、圧縮形式での音割れを避けるため約 1 dB のヘッドルームを確保します。
 
 再生開始時のクリックや立ち上がりノイズを抑えるため、既定で出力全体の冒頭に5msのスムーズフェードを適用します。無効化する場合は `--fade-in 0`、さらに柔らかくする場合は `--fade-in 0.02` などを指定します。各音符の立ち上がりは `--attack` で調整できます。
+
+### その場で再生する
+
+`--play` を付けると、ファイル出力後に `ffplay`（ffmpeg同梱）で音声を再生します。MP3/OGG出力と同じくffmpegが必要です。
+
+```bash
+python sfx_generator.py --preset coin --play
+python sfx_generator.py --input "O4 L4 T120 C E G C" --style sine --play
+```
 
 ## MML コマンド（独自簡易版）
 
