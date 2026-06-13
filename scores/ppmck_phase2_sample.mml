@@ -1,0 +1,7 @@
+#TITLE PPMCK phase2 sample
+; quantize, transpose, direct note notation, and @q
+T120 L4 O4
+Q4,6 C4
+Q8,0 K+12 C4
+K0 N32,8
+@Q3 N16,8

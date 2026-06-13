@@ -34,6 +34,7 @@ python tools/sound/sfx_generator.py --input-file path/to/your_score.abc --format
 | `twinkle_twinkle.abc` | 単旋律の ABC 例 |
 | `amazing_grace.abc` | 弱起・付点を含む 3/4 拍子 |
 | `ode_to_joy_melody.abc` + `ode_to_joy_bass.abc` | 二重奏サンプル |
+| `scores/ppmck_phase2_sample.mml` | フェーズ2互換（Q/K/N）の検証用 |
 | `canon_in_d_*.mml` | 3 トラックのカノン |
 | `fur_elise_fast_sample.abc` | 短い音符・休符のタイミング確認 |
 

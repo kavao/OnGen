@@ -404,7 +404,12 @@ class MmlNoteLengthTests(unittest.TestCase):
 
     def test_unsupported_token_raises_value_error(self) -> None:
         with self.assertRaises(ValueError):
-            parse_mml("O4 T120 L4 C;D")
+            parse_mml("O4 T120 L4 C Z")
+
+    def test_semicolon_comment_is_stripped_before_parsing(self) -> None:
+        events = parse_mml("O4 T120 L4 C4; trailing comment")
+        self.assertEqual(len(events), 1)
+        self.assertAlmostEqual(events[0].frequency, note_name_to_freq("C", 4))
 
     def test_preset_pitch_sequences_match_expected_notes(self) -> None:
         expected_by_preset = {
@@ -427,6 +432,118 @@ class MmlNoteLengthTests(unittest.TestCase):
                     continue
                 name, octave = expected
                 self.assertAlmostEqual(event.frequency, note_name_to_freq(name, octave))
+
+
+class MmlPhase2CompatTests(unittest.TestCase):
+    def test_gate_shortens_sound_and_inserts_rest(self) -> None:
+        events = parse_mml("O4 T120 L4 Q4 C4")
+        quarter = 60.0 / 120
+        self.assertEqual(len(events), 2)
+        self.assertAlmostEqual(events[0].frequency, note_name_to_freq("C", 4))
+        self.assertAlmostEqual(events[0].duration, quarter / 2)
+        self.assertIsNone(events[1].frequency)
+        self.assertAlmostEqual(events[1].duration, quarter / 2)
+
+    def test_gate_frame_adjustment_is_added_after_ratio(self) -> None:
+        events = parse_mml("O4 T120 L4 Q4,6 C4")
+        quarter = 60.0 / 120
+        self.assertEqual(len(events), 2)
+        self.assertAlmostEqual(events[0].duration, quarter / 2 + 0.1)
+        self.assertAlmostEqual(events[1].duration, quarter / 2 - 0.1)
+
+    def test_gate_denominator_directive_changes_ratio(self) -> None:
+        events = parse_mml("#GATE-DENOM 4\nO4 T120 L4 Q2 C4")
+        quarter = 60.0 / 120
+        self.assertAlmostEqual(events[0].duration, quarter / 2)
+        self.assertAlmostEqual(events[1].duration, quarter / 2)
+
+    def test_gate_and_tie_are_applied_to_combined_duration(self) -> None:
+        events = parse_mml("O4 T120 L4 Q4 C&C")
+        quarter = 60.0 / 120
+        self.assertEqual(len(events), 2)
+        self.assertAlmostEqual(events[0].frequency, note_name_to_freq("C", 4))
+        self.assertAlmostEqual(events[0].duration, quarter)
+        self.assertIsNone(events[1].frequency)
+        self.assertAlmostEqual(events[1].duration, quarter)
+
+    def test_tie_rejects_different_pitch_or_rest(self) -> None:
+        for mml in ("C&D", "R&C"):
+            with self.subTest(mml=mml), self.assertRaises(ValueError):
+                parse_mml(mml)
+
+    def test_invalid_gate_values_raise_value_error(self) -> None:
+        for mml in (
+            "Q9 C4",
+            "Q4,-60 C4",
+            "Q8,1 C4",
+            "#GATE-DENOM 0\nC4",
+            "#GATE-DENOM -1\nC4",
+        ):
+            with self.subTest(mml=mml), self.assertRaises(ValueError):
+                parse_mml(mml)
+
+    def test_transpose_shifts_pitch(self) -> None:
+        events = parse_mml("O4 T120 L4 K+12 C4")
+        self.assertEqual(len(events), 1)
+        self.assertAlmostEqual(events[0].frequency, note_name_to_freq("C", 5))
+
+    def test_invalid_transpose_values_raise_value_error(self) -> None:
+        for mml in ("K-128 C4", "K127 C4"):
+            with self.subTest(mml=mml), self.assertRaises(ValueError):
+                parse_mml(mml)
+
+    def test_direct_note_number_matches_ppmck_convention(self) -> None:
+        events = parse_mml("T120 L4 N32,4")
+        self.assertEqual(len(events), 1)
+        self.assertAlmostEqual(events[0].frequency, note_name_to_freq("C", 4))
+        self.assertAlmostEqual(events[0].duration, 0.5)
+
+    def test_direct_note_number_uses_sixteen_values_per_octave(self) -> None:
+        events = parse_mml("T120 L4 N0 N11 N13 N16")
+        self.assertAlmostEqual(events[0].frequency, note_name_to_freq("C", 2))
+        self.assertAlmostEqual(events[1].frequency, note_name_to_freq("B", 2))
+        self.assertAlmostEqual(events[2].frequency, note_name_to_freq("A", 1))
+        self.assertAlmostEqual(events[3].frequency, note_name_to_freq("C", 3))
+
+    def test_invalid_direct_note_numbers_raise_value_error(self) -> None:
+        for mml in ("N12", "N96"):
+            with self.subTest(mml=mml), self.assertRaises(ValueError):
+                parse_mml(mml)
+
+    def test_hash_directive_lines_are_skipped(self) -> None:
+        events = parse_mml("#TITLE sample\nO4 T120 L4 C4")
+        self.assertEqual(len(events), 1)
+        self.assertAlmostEqual(events[0].frequency, note_name_to_freq("C", 4))
+
+    def test_comment_or_metadata_only_input_is_empty(self) -> None:
+        self.assertEqual(parse_mml("; comment only"), [])
+        self.assertEqual(parse_mml("#TITLE metadata only"), [])
+
+    def test_at_q_shortens_sound_by_frames(self) -> None:
+        events = parse_mml("T120 L4 @Q15 N32,4")
+        self.assertEqual(len(events), 2)
+        self.assertAlmostEqual(events[0].duration, 0.5 - (15 / 60.0))
+        self.assertIsNone(events[1].frequency)
+        self.assertAlmostEqual(events[1].duration, 15 / 60.0)
+
+    def test_invalid_at_q_value_raises_value_error(self) -> None:
+        with self.assertRaises(ValueError):
+            parse_mml("@Q65536 C4")
+
+    def test_ppmck_phase2_sample_score(self) -> None:
+        events = parse_mml(
+            (ROOT / "scores" / "ppmck_phase2_sample.mml").read_text(encoding="utf-8")
+        )
+        quarter = 60.0 / 120
+        self.assertEqual(len(events), 6)
+        self.assertAlmostEqual(events[0].frequency, note_name_to_freq("C", 4))
+        self.assertAlmostEqual(events[0].duration, quarter / 2 + 0.1)
+        self.assertIsNone(events[1].frequency)
+        self.assertAlmostEqual(events[2].frequency, note_name_to_freq("C", 5))
+        self.assertAlmostEqual(events[3].frequency, note_name_to_freq("C", 4))
+        self.assertAlmostEqual(events[4].frequency, note_name_to_freq("C", 3))
+        self.assertAlmostEqual(events[4].duration, quarter / 2 - 0.05)
+        self.assertIsNone(events[5].frequency)
 
 
 if __name__ == "__main__":

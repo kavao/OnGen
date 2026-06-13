@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import math
 import re
 import subprocess
 import sys
@@ -694,6 +695,10 @@ MML_TOKEN_RE = re.compile(
     (?P<octave_up>>) |
     (?P<octave_down><) |
     (?P<tie>&) |
+    (?P<gate_cut>@Q\d+) |
+    (?P<gate>Q\d+(?:,[+-]?\d+)?) |
+    (?P<transpose>K[+-]?\d+) |
+    (?P<note_num>N\d+(?:,\d+)?) |
     (?P<fm_pct>%\d+) |
     (?P<fm_mul>\*\d+) |
     (?P<lfo_cmd>~\d+) |
@@ -704,6 +709,11 @@ MML_TOKEN_RE = re.compile(
     """,
     re.VERBOSE | re.IGNORECASE,
 )
+
+PPMCK_NOTE_ZERO_MIDI = 36
+PPMCK_TRANSPOSE_MIN = -127
+PPMCK_TRANSPOSE_MAX = 126
+PPMCK_DIRECT_NOTE_MAX = 95
 
 
 @dataclass
@@ -718,6 +728,11 @@ class MMLState:
     fm_ratio: float | None = None
     lfo_depth: float | None = None
     sample_path: str | None = None
+    transpose: int = 0
+    gate: int = 8
+    gate_denom: int = 8
+    gate_adjust_frames: int = 0
+    gate_cut_frames: int = 0
 
 
 def mml_length_to_seconds(length: int, dotted: int, tempo: int) -> float:
@@ -739,6 +754,50 @@ def mml_scale_to_fm_index(value: int) -> float:
 
 def mml_scale_to_lfo_depth(value: int) -> float:
     return (min(max(value, 0), 15) / 15.0) * 0.08
+
+
+def preprocess_mml_text(text: str) -> str:
+    cleaned_lines: list[str] = []
+    for raw_line in text.splitlines():
+        line = raw_line.split(";", 1)[0].strip()
+        if not line:
+            continue
+        if line.startswith("#"):
+            if line.upper().startswith("#GATE-DENOM"):
+                cleaned_lines.append(line)
+            continue
+        cleaned_lines.append(line)
+    return " ".join(cleaned_lines)
+
+
+def mml_apply_gate(full_duration: float, state: MMLState) -> tuple[float, float]:
+    denom = state.gate_denom
+    if denom < 1 or not 0 <= state.gate <= denom:
+        raise ValueError(f"PPMCKクオンタイズ値の範囲外です: q{state.gate} (分母 {denom})")
+    sound = full_duration * (state.gate / denom) + state.gate_adjust_frames / 60.0
+    if state.gate_cut_frames > 0:
+        sound = max(0.0, sound - state.gate_cut_frames / 60.0)
+    if sound <= 0.0 or sound > full_duration:
+        raise ValueError(
+            "PPMCKクオンタイズ後の発音時間は0秒より長く、音長以下である必要があります"
+        )
+    rest = max(0.0, full_duration - sound)
+    return sound, rest
+
+
+def mml_freq_from_note_number(note_num: int, transpose: int) -> float:
+    if not 0 <= note_num <= PPMCK_DIRECT_NOTE_MAX:
+        raise ValueError(f"PPMCK直接ノート番号の範囲外です: n{note_num}")
+    # PPMCK uses 16 slots per octave; 13 through 15 alias A through B one octave down.
+    octave, pitch = divmod(note_num, 16)
+    if pitch == 12:
+        raise ValueError(f"PPMCK直接ノート番号の未定義値です: n{note_num}")
+    semitone = pitch if pitch < 12 else pitch - 16
+    return midi_to_freq(PPMCK_NOTE_ZERO_MIDI + octave * 12 + semitone + transpose)
+
+
+def mml_freq_from_name(name: str, octave: int, transpose: int) -> float:
+    return midi_to_freq(note_to_midi(name, octave) + transpose)
 
 
 def make_note_event(
@@ -774,20 +833,94 @@ def parse_mml(text: str, default_config: SynthConfig | None = None) -> list[Note
         sample_paths[key] = match.group(1)
         return f"W({key})"
 
-    normalized = re.sub(r"W\(([^)]+)\)", _stash_sample, text, flags=re.IGNORECASE)
+    preprocessed = preprocess_mml_text(text)
+    gate_denom_match = re.search(r"#GATE-DENOM\s+([+-]?\d+)", preprocessed, re.IGNORECASE)
+    if gate_denom_match:
+        gate_denom = int(gate_denom_match.group(1))
+        if gate_denom <= 0:
+            raise ValueError(f"PPMCK #GATE-DENOM値の範囲外です: {gate_denom}")
+        state.gate_denom = gate_denom
+        preprocessed = re.sub(
+            r"#GATE-DENOM\s+[+-]?\d+", "", preprocessed, flags=re.IGNORECASE
+        )
+
+    normalized = re.sub(r"W\(([^)]+)\)", _stash_sample, preprocessed, flags=re.IGNORECASE)
     compact = re.sub(r"\s+", "", normalized.upper())
     for key, path in sample_paths.items():
         compact = compact.replace(f"W({key.upper()})", f"W({path})")
 
     tie_pending = False
+    last_pitched_event: NoteEvent | None = None
+    last_gate_rest: NoteEvent | None = None
+    last_pitched_full_duration = 0.0
 
     def emit(event: NoteEvent) -> None:
-        nonlocal tie_pending
+        nonlocal tie_pending, last_pitched_event, last_gate_rest, last_pitched_full_duration
         if tie_pending and events:
             events[-1].duration += event.duration
         else:
             events.append(event)
         tie_pending = False
+        last_pitched_event = None
+        last_gate_rest = None
+        last_pitched_full_duration = 0.0
+
+    def emit_pitched(full_duration: float, frequency: float) -> None:
+        nonlocal tie_pending, last_pitched_event, last_gate_rest, last_pitched_full_duration
+        if tie_pending and last_pitched_event is not None:
+            if not math.isclose(last_pitched_event.frequency or 0.0, frequency):
+                raise ValueError("PPMCKの & で接続できるのは同じ音程の音符だけです")
+            if last_gate_rest is not None and events and events[-1] is last_gate_rest:
+                events.pop()
+            combined_duration = last_pitched_full_duration + full_duration
+            sound, rest = mml_apply_gate(combined_duration, state)
+            last_pitched_event.duration = sound
+            last_pitched_full_duration = combined_duration
+            last_gate_rest = None
+            if rest > 0:
+                last_gate_rest = make_note_event(
+                    state=state,
+                    default_config=default_config,
+                    duration=rest,
+                    frequency=None,
+                )
+                events.append(last_gate_rest)
+            tie_pending = False
+            return
+        if tie_pending:
+            raise ValueError("PPMCKの & の前後には同じ音程の音符が必要です")
+
+        sound, rest = mml_apply_gate(full_duration, state)
+        pitched_event = make_note_event(
+            state=state,
+            default_config=default_config,
+            duration=sound,
+            frequency=frequency,
+        )
+        if sound > 0:
+            events.append(pitched_event)
+        last_pitched_event = pitched_event
+        last_pitched_full_duration = full_duration
+        last_gate_rest = None
+        if rest > 0:
+            last_gate_rest = make_note_event(
+                state=state,
+                default_config=default_config,
+                duration=rest,
+                frequency=None,
+            )
+            events.append(last_gate_rest)
+        tie_pending = False
+
+    def emit_rest(full_duration: float) -> None:
+        emit(
+            make_note_event(
+                state=state,
+                default_config=default_config,
+                duration=full_duration,
+                frequency=None,
+            )
+        )
 
     pos = 0
     while pos < len(compact):
@@ -825,6 +958,49 @@ def parse_mml(text: str, default_config: SynthConfig | None = None) -> list[Note
 
         if match.group("tie"):
             tie_pending = True
+            continue
+
+        if match.group("gate_cut"):
+            gate_cut_frames = int(match.group("gate_cut")[2:])
+            if not 0 <= gate_cut_frames <= 65535:
+                raise ValueError(f"PPMCK @q値の範囲外です: @q{gate_cut_frames}")
+            state.gate_cut_frames = gate_cut_frames
+            continue
+
+        if match.group("gate"):
+            token = match.group("gate")[1:]
+            if "," in token:
+                gate_text, adjust_text = token.split(",", 1)
+                state.gate = int(gate_text)
+                state.gate_adjust_frames = int(adjust_text)
+            else:
+                state.gate = int(token)
+                state.gate_adjust_frames = 0
+            if not 0 <= state.gate <= state.gate_denom:
+                raise ValueError(
+                    f"PPMCKクオンタイズ値の範囲外です: q{state.gate} (分母 {state.gate_denom})"
+                )
+            continue
+
+        if match.group("transpose"):
+            token = match.group("transpose")[1:]
+            transpose = int(token)
+            if not PPMCK_TRANSPOSE_MIN <= transpose <= PPMCK_TRANSPOSE_MAX:
+                raise ValueError(f"PPMCKトランスポーズ値の範囲外です: K{token}")
+            state.transpose = transpose
+            continue
+
+        if match.group("note_num"):
+            token = match.group("note_num")[1:]
+            if "," in token:
+                num_text, len_text = token.split(",", 1)
+                note_num = int(num_text)
+                length = int(len_text)
+            else:
+                note_num = int(token)
+                length = state.length
+            full_duration = mml_length_to_seconds(length, 0, state.tempo)
+            emit_pitched(full_duration, mml_freq_from_note_number(note_num, state.transpose))
             continue
 
         if match.group("cmd"):
@@ -873,14 +1049,7 @@ def parse_mml(text: str, default_config: SynthConfig | None = None) -> list[Note
             sample_token = match.group("sample")
             state.sample_path = sample_token[2:-1]
             duration = mml_length_to_seconds(state.length, 0, state.tempo)
-            emit(
-                make_note_event(
-                    state=state,
-                    default_config=default_config,
-                    duration=duration,
-                    frequency=None,
-                )
-            )
+            emit_rest(duration)
             state.sample_path = None
             continue
 
@@ -890,15 +1059,8 @@ def parse_mml(text: str, default_config: SynthConfig | None = None) -> list[Note
             length_match = re.fullmatch(r"R(\d+)", token, re.IGNORECASE)
             if length_match:
                 length = int(length_match.group(1))
-            duration = mml_length_to_seconds(length, 0, state.tempo)
-            emit(
-                make_note_event(
-                    state=state,
-                    default_config=default_config,
-                    duration=duration,
-                    frequency=None,
-                )
-            )
+            full_duration = mml_length_to_seconds(length, 0, state.tempo)
+            emit_rest(full_duration)
             continue
 
         if match.group("note"):
@@ -910,15 +1072,10 @@ def parse_mml(text: str, default_config: SynthConfig | None = None) -> list[Note
             length_text = note_match.group(2)
             dots = note_match.group(3) or ""
             length = int(length_text) if length_text else state.length
-            freq = note_name_to_freq(name, state.octave)
-            duration = mml_length_to_seconds(length, len(dots), state.tempo)
-            emit(
-                make_note_event(
-                    state=state,
-                    default_config=default_config,
-                    duration=duration,
-                    frequency=freq,
-                )
+            full_duration = mml_length_to_seconds(length, len(dots), state.tempo)
+            emit_pitched(
+                full_duration,
+                mml_freq_from_name(name, state.octave, state.transpose),
             )
 
     return events
