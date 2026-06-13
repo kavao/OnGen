@@ -1,0 +1,21 @@
+{
+  // 出力先の LLM ツール。不要なものは削除、追加したいものは追記する。
+  // 選択肢: "claudecode" | "cursor" | "copilot" | "codexcli" | "kilo"
+  "targets": [
+    "claudecode",
+    "cursor",
+    "codexcli"
+  ],
+  // 使用する機能
+  "features": [
+    "rules",
+    "skills"
+  ],
+  // rulesync の出力先ルート（通常はプロジェクトルート）
+  "outputRoots": [
+    "."
+  ],
+  "delete": true,
+  "verbose": false,
+  "silent": false
+}

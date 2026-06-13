@@ -1,0 +1,62 @@
+# Generated audio
+/output/
+
+# Python bytecode and caches
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# Local environment and secrets
+.env
+.env.*
+!.env.example
+
+# Build and packaging output
+build/
+dist/
+*.egg-info/
+
+# Local tool/session artifacts
+/terminals/
+/mcps/
+*.log
+*.tmp
+*.temp
+
+# rulesync generated files
+# Canonical sources are rulesync.jsonc and .rulesync/
+.claude/
+.cursor/
+.codex/
+.kilo/
+.agent/
+.agents/
+AGENTS.md
+CLAUDE.md
+
+# dna_kernel local workingspace
+/_workingspace/
+_backup/
+_old/
+
+# Node.js (rulesync)
+node_modules/
+
+# Editors and operating systems
+.idea/
+.vscode/
+*.swp
+*.swo
+.DS_Store
+Thumbs.db
+desktop.ini

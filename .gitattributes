@@ -1,0 +1,12 @@
+* text=auto
+
+*.py text eol=lf
+*.md text eol=lf
+*.txt text eol=lf
+*.abc text eol=lf
+*.mml text eol=lf
+*.json text eol=lf
+
+*.wav binary
+*.mp3 binary
+*.ogg binary
