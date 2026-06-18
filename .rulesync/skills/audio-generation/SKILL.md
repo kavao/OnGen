@@ -70,6 +70,7 @@ OnGenの音源生成ツールを使い、ゲームやアプリ向けの効果音
 
 1. 単音、短いスケール、既知の基準曲（例: チューリップ）でパーサーと合成を確認する。
 2. 検証出力は本番アセットと分離する。
+3. 生成後は `--lint --analyze` で楽譜イベントと波形を確認する。
 
 ## Common commands
 
@@ -87,6 +88,51 @@ python tools/sound/sfx_generator.py --mml-dialect pyxel --max-repeat 4 --input-f
 python tools/sound/sfx_generator.py --mml-dialect pyxel --pyxel-multipart --input-file MML.txt -o output/pyxel/composer-preview
 python -m unittest discover -s tests -v
 ```
+
+品質確認コマンド（通常は `--lint --analyze` を使う）:
+
+```bash
+# 通常作業
+python tools/sound/sfx_generator.py --input-file scores/example.mml --lint --analyze -o output/check/example
+# 比較・記録用レポートを残す
+python tools/sound/sfx_generator.py --input-file scores/example.mml --lint --analyze --report-json output/check/example.json -o output/check/example
+# 警告をエラーとして扱う（CI向け）
+python tools/sound/sfx_generator.py --input-file scores/example.mml --lint --analyze --fail-on-warn -o output/check/example
+```
+
+詳細は `docs/audio/quality-check.md`。
+
+## PPMCK / MCK MML
+
+既定の方言は `ppmck`（`--mml-dialect` 省略時）。
+
+| 記法 | 意味 |
+|------|------|
+| `c4` | 4分音符 C（音符直後の数字 = 音長） |
+| `O3` / `>` / `<` | オクターブ指定 / 上げ / 下げ |
+| `#METER` / `#TIME` | 拍子メタ情報（再生音ではなく小節確認用） |
+| `A`〜`E` | トラック宣言（A/B=square、C=triangle、D/E=noise） |
+| `Q<n>` / `@Q<n>` | ゲートタイム / 60fps 換算フレーム短縮 |
+| `K<n>` | 半音単位トランスポーズ |
+| `N<n>` / `N<n>,<len>` | 直接ノート番号 |
+| `@v<n>` | 音量エンベロープ |
+| `@EP<n>` / `@EN<n>` / `@MP<n>` | ピッチ / ノート / ピッチ LFO エンベロープ |
+| `\|` | マクロ内ループ指定 |
+
+詳細・未対応項目は `docs/audio/mml-reference.md`。PPMCK/MCK マクロは実用近似であり完全互換を保証しない。
+
+## Verification samples
+
+各サンプルの役割を確認するときに使う。
+
+| サンプル | 確認項目 |
+|----------|----------|
+| `scores/macro_pitch_variation_sample.mml` | `@v` / `@EP` / `@EN` / `@MP` の耳確認 |
+| `scores/kaeru_no_uta_duet.mml` | `#METER` と 1 小節遅れ |
+| `scores/ppmck_phase2_sample.mml` | `Q` / `K` / `N` / `@Q` |
+| `scores/ppmck_phase3_sample.mml` | `A`〜`E` トラック宣言 |
+| `scores/pyxel_*.mml` | Pyxel 方言 |
+| `scores/pyxel_composer_sample.mml` | `--pyxel-multipart` |
 
 ## Pyxel 向け MML
 
@@ -130,5 +176,8 @@ Pyxel Composerなどの「1行につき1パート」のテキストは、`--pyxe
 
 - 実在楽曲のサンプルは、信頼できる楽譜と音程・音価を照合する。
 - `output/` やゲームアセットの生成物だけを直して完了にしない。正本の楽譜または生成コマンドを残す。
+- `output/` の WAV / JSON は派生成果物であり、MML/ABC または再実行可能な CLI コマンドを正本にする。
 - MMLの音符直後の数字は音長（PPMCK / MCK流）。オクターブは`O`コマンドと相対オクターブ変更`>` / `<`で指定する。詳細・未対応項目は`docs/audio/mml-reference.md`を確認する。
-- Rulesync生成物（`.agents/skills/audio-generation/` 等）は直接編集しない。正本は `.rulesync/skills/audio-generation/SKILL.md` を更新してから `rulesync generate` する。
+- 品質判定の細部は `docs/audio/quality-check.md` を参照する。
+- Pyxel 方言は完全一致ではなく簡易近似。PPMCK/MCK マクロも現時点では実用近似であり、完全互換を名乗らない。
+- Rulesync生成物（`.agents/skills/audio-generation/` 等）は直接編集しない。正本は `.rulesync/skills/audio-generation/SKILL.md` を更新してから `npx rulesync generate` する。
