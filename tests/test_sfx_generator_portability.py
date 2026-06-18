@@ -37,6 +37,32 @@ class PortabilityTests(unittest.TestCase):
             self.assertEqual(result.returncode, 0, result.stderr)
             self.assertIn("coin", result.stdout)
 
+    def test_single_file_copy_runs_lint_and_analyze(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp = Path(tmpdir)
+            shutil.copy2(CANONICAL_PATH, tmp / "sfx_generator.py")
+            result = subprocess.run(
+                [
+                    sys.executable,
+                    str(tmp / "sfx_generator.py"),
+                    "--input",
+                    "O4 L4 T120 C",
+                    "--lint",
+                    "--analyze",
+                    "--report-json",
+                    str(tmp / "report.json"),
+                    "-o",
+                    str(tmp / "sample"),
+                ],
+                cwd=tmp,
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertIn("OnGen Audio Lint Report", result.stdout)
+            self.assertTrue((tmp / "report.json").exists())
+
 
 if __name__ == "__main__":
     unittest.main()

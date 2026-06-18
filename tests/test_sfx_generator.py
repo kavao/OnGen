@@ -37,11 +37,14 @@ SynthConfig = sg.SynthConfig
 abc_default_unit_from_meter = sg.abc_default_unit_from_meter
 abc_length_multiplier = sg.abc_length_multiplier
 abc_quarter_note_tempo = sg.abc_quarter_note_tempo
+analyze_audio_array = sg.analyze_audio_array
 apply_master_fade = sg.apply_master_fade
 apply_audio_filter = sg.apply_audio_filter
 build_config_from_args = sg.build_config_from_args
 create_parser = sg.create_parser
+format_report_text = sg.format_report_text
 generate_colored_noise = sg.generate_colored_noise
+lint_note_events = sg.lint_note_events
 main = sg.main
 mix_tracks = sg.mix_tracks
 load_preset = sg.load_preset
@@ -49,8 +52,10 @@ note_name_to_freq = sg.note_name_to_freq
 parse_abc = sg.parse_abc
 parse_mml = sg.parse_mml
 parse_pyxel_mml = sg.parse_pyxel_mml
+parse_mml_metadata = sg.parse_mml_metadata
 parse_mml_by_dialect = sg.parse_mml_by_dialect
 parse_mml_source = sg.parse_mml_source
+mml_measure_duration_seconds = sg.mml_measure_duration_seconds
 report_pyxel_compat_issues = sg.report_pyxel_compat_issues
 PYXEL_TONE_MAP = sg.PYXEL_TONE_MAP
 resolve_track_specs = sg.resolve_track_specs
@@ -169,6 +174,72 @@ class AudioQualityTests(unittest.TestCase):
             self.assertLess(float(np.max(np.abs(audio))), 0.99)
 
 
+class AudioLintAnalysisTests(unittest.TestCase):
+    def test_analyze_audio_array_reports_clipping_and_silence(self) -> None:
+        audio = np.concatenate([
+            np.zeros(44100),
+            np.full(32, 1.0),
+        ])
+        report = analyze_audio_array(audio)
+        codes = {issue.code for issue in report.issues}
+        self.assertEqual(report.status, "ERROR")
+        self.assertIn("clipping_detected", codes)
+        self.assertIn("too_long_silence", codes)
+
+    def test_lint_note_events_reports_range_and_large_jump(self) -> None:
+        events = [
+            NoteEvent(frequency=note_name_to_freq("C", 4), duration=0.25),
+            NoteEvent(frequency=note_name_to_freq("C", 7), duration=0.25),
+            NoteEvent(frequency=note_name_to_freq("C", 9), duration=0.25),
+        ]
+        report = lint_note_events(events)
+        codes = {issue.code for issue in report.issues}
+        self.assertEqual(report.status, "ERROR")
+        self.assertEqual(report.note_range, "C4 - C9")
+        self.assertIn("note_jump_too_large", codes)
+        self.assertIn("note_above_hard_limit", codes)
+
+    def test_format_report_text_includes_issue_codes(self) -> None:
+        report = lint_note_events([
+            NoteEvent(frequency=note_name_to_freq("C", 4), duration=0.001),
+        ])
+        text = format_report_text(report)
+        self.assertIn("OnGen Audio Lint Report", text)
+        self.assertIn("note_too_short", text)
+
+    def test_cli_writes_json_report(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            output = str(Path(tmpdir) / "lint_sample")
+            report_path = Path(tmpdir) / "report.json"
+            exit_code = main(
+                [
+                    "--input", "O4 L4 T120 C",
+                    "--lint",
+                    "--analyze",
+                    "--report-json", str(report_path),
+                    "-o", output,
+                ]
+            )
+            self.assertEqual(exit_code, 0)
+            data = json.loads(report_path.read_text(encoding="utf-8"))
+            self.assertEqual(data["status"], "OK")
+            self.assertEqual(data["note_range"], "C4 - C4")
+            self.assertIsInstance(data["issues"], list)
+
+    def test_cli_fail_on_warn_returns_nonzero(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            output = str(Path(tmpdir) / "lint_warn")
+            exit_code = main(
+                [
+                    "--input", "O4 L512 T120 C",
+                    "--lint",
+                    "--fail-on-warn",
+                    "-o", output,
+                ]
+            )
+            self.assertEqual(exit_code, 1)
+
+
 class TrackStyleTests(unittest.TestCase):
     def test_track_style_parses_in_declared_order(self) -> None:
         parser = create_parser()
@@ -266,6 +337,42 @@ class TulipBenchmarkTests(unittest.TestCase):
     def test_inline_comment_does_not_create_notes(self) -> None:
         events = parse_abc("X:1\nL:1/4\nK:C\nC % BAD should not become notes")
         self.assertEqual(len(events), 1)
+
+
+class KaeruNoUtaDuetBenchmarkTests(unittest.TestCase):
+    def test_kaeru_no_uta_duet_tracks_form_delayed_round(self) -> None:
+        text = (ROOT / "scores" / "kaeru_no_uta_duet.mml").read_text(encoding="utf-8")
+        tracks = parse_mml_source(text)
+        self.assertEqual([track.channel for track in tracks], ["A", "B"])
+        by_channel = {track.channel: track for track in tracks}
+        melody = by_channel["A"].events
+        delayed = by_channel["B"].events
+        metadata = by_channel["A"].metadata
+        sounding_melody = [event for event in melody if event.frequency is not None]
+        expected_notes = (
+            "C D E F E D C "
+            "E F G A G F E "
+            "C C C C C C D D "
+            "E E F F E D C"
+        ).split()
+
+        self.assertEqual(len(sounding_melody), len(expected_notes))
+        for event, note in zip(sounding_melody, expected_notes):
+            self.assertAlmostEqual(event.frequency, note_name_to_freq(note, 4))
+
+        self.assertEqual(parse_mml_metadata(text)["meter"], "4/4")
+        self.assertEqual(metadata["meter"], "4/4")
+        one_measure = mml_measure_duration_seconds(metadata["meter"], tempo=120)
+        self.assertIsNone(delayed[0].frequency)
+        self.assertAlmostEqual(sum(event.duration for event in delayed[:1]), one_measure)
+        self.assertAlmostEqual(sum(event.duration for event in melody), 16.0)
+        self.assertAlmostEqual(sum(event.duration for event in delayed), 18.0)
+        self.assertEqual(
+            [event.frequency is None for event in melody[14:22]],
+            [False, True, False, True, False, True, False, True],
+        )
+        for event in melody[22:30]:
+            self.assertAlmostEqual(event.duration, 0.25)
 
 
 class FastPlaybackBenchmarkTests(unittest.TestCase):
@@ -614,6 +721,12 @@ class MmlPhase3CompatTests(unittest.TestCase):
         self.assertEqual(len(tracks), 1)
         self.assertEqual(tracks[0].channel, "")
         self.assertEqual(len(tracks[0].events), 1)
+
+    def test_parse_mml_source_keeps_meter_metadata(self) -> None:
+        tracks = parse_mml_source("#TITLE Test\n#METER 3/4\nA O4 L4 C D E")
+        self.assertEqual(tracks[0].metadata["title"], "Test")
+        self.assertEqual(tracks[0].metadata["meter"], "3/4")
+        self.assertAlmostEqual(mml_measure_duration_seconds("3/4", tempo=120), 1.5)
 
     def test_parse_mml_source_assigns_channel_defaults(self) -> None:
         tracks = parse_mml_source("A C4\nC O2 L2 C2\nD R16")

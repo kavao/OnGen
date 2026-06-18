@@ -1,0 +1,23 @@
+#TITLE Kaeru no Uta duet sample
+#METER 4/4
+; Two-part canon-style sample. Part B enters one measure after Part A.
+A @1 V10 O4 L4 T120
+C4 D4 E4 F4
+E4 D4 C2
+E4 F4 G4 A4
+G4 F4 E2
+C4 R4 C4 R4
+C4 R4 C4 R4
+C8 C8 D8 D8 E8 E8 F8 F8
+E4 D4 C2
+
+B @2 V8 O4 L4 T120
+R1
+C4 D4 E4 F4
+E4 D4 C2
+E4 F4 G4 A4
+G4 F4 E2
+C4 R4 C4 R4
+C4 R4 C4 R4
+C8 C8 D8 D8 E8 E8 F8 F8
+E4 D4 C2

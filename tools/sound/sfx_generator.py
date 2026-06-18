@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
-# Version: 0.4.1 (正本: .rulesync/metadata/sfx-generator.json)
+# Version: 0.4.3 (正本: .rulesync/metadata/sfx-generator.json)
 """OnGen: NumPy/SciPy ベースのMML・ABC音源合成ツール。"""
 
 from __future__ import annotations
 
 import argparse
+import json
 import math
 import re
 import subprocess
@@ -19,7 +20,7 @@ import numpy as np
 from scipy.io import wavfile
 from scipy.signal import butter, sosfilt
 
-__version__ = "0.4.1"
+__version__ = "0.4.3"
 
 SAMPLE_RATE = 44100
 BIT_DEPTH = 16
@@ -27,6 +28,17 @@ OUTPUT_DIR = Path("output")
 AUDIO_EXTENSIONS = {".wav", ".mp3", ".ogg"}
 OUTPUT_FORMATS = ("wav", "mp3", "ogg", "all")
 MIX_HEADROOM = 10.0 ** (-1.0 / 20.0)
+SILENCE_THRESHOLD = 10.0 ** (-60.0 / 20.0)
+CLIP_THRESHOLD = 0.999
+LOUD_PEAK_DB = -0.5
+QUIET_RMS_DB = -45.0
+LONG_SILENCE_SEC = 0.5
+MIN_NOTE_DURATION_SEC = 0.01
+MAX_NOTE_DURATION_SEC = 8.0
+MAX_NOTE_JUMP_SEMITONES = 24
+NOTE_HARD_LOW_MIDI = 12
+NOTE_HARD_HIGH_MIDI = 108
+LOOP_EDGE_GAP_WARN = 0.25
 
 NOTE_NAMES = ("C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B")
 NOTE_ALIASES = {
@@ -153,6 +165,24 @@ class NoteEvent:
     glide_duration: float | None = None
 
 
+@dataclass
+class AudioIssue:
+    level: str
+    code: str
+    message: str
+    value: float | int | str | None = None
+
+
+@dataclass
+class AudioReport:
+    status: str
+    duration: float | None = None
+    peak_db: float | None = None
+    rms_db: float | None = None
+    note_range: str | None = None
+    issues: list[AudioIssue] = field(default_factory=list)
+
+
 def midi_to_freq(midi: int) -> float:
     return 440.0 * (2.0 ** ((midi - 69) / 12.0))
 
@@ -166,6 +196,18 @@ def note_to_midi(name: str, octave: int) -> int:
 
 def note_name_to_freq(name: str, octave: int) -> float:
     return midi_to_freq(note_to_midi(name, octave))
+
+
+def freq_to_midi(frequency: float) -> int:
+    if frequency <= 0:
+        raise ValueError("frequency must be positive")
+    return int(round(69 + 12 * math.log2(frequency / 440.0)))
+
+
+def midi_to_note_label(midi: int) -> str:
+    name = NOTE_NAMES[midi % 12]
+    octave = midi // 12 - 1
+    return f"{name}{octave}"
 
 
 def generate_square(phase: np.ndarray, duty: float = 0.5) -> np.ndarray:
@@ -572,6 +614,179 @@ def normalize_and_convert(audio: np.ndarray) -> np.ndarray:
     return (clipped * (2 ** (BIT_DEPTH - 1) - 1)).astype(np.int16)
 
 
+def dbfs(value: float) -> float | None:
+    if value <= 0:
+        return None
+    return 20.0 * math.log10(value)
+
+
+def report_status(issues: Sequence[AudioIssue]) -> str:
+    if any(issue.level == "ERROR" for issue in issues):
+        return "ERROR"
+    if any(issue.level == "WARN" for issue in issues):
+        return "WARN"
+    return "OK"
+
+
+def merge_reports(reports: Sequence[AudioReport]) -> AudioReport:
+    issues: list[AudioIssue] = []
+    duration: float | None = None
+    peak_db: float | None = None
+    rms_db: float | None = None
+    note_range: str | None = None
+    for report in reports:
+        issues.extend(report.issues)
+        duration = report.duration if report.duration is not None else duration
+        peak_db = report.peak_db if report.peak_db is not None else peak_db
+        rms_db = report.rms_db if report.rms_db is not None else rms_db
+        note_range = report.note_range if report.note_range is not None else note_range
+    return AudioReport(
+        status=report_status(issues),
+        duration=duration,
+        peak_db=peak_db,
+        rms_db=rms_db,
+        note_range=note_range,
+        issues=issues,
+    )
+
+
+def longest_silence_duration(audio: np.ndarray, sample_rate: int) -> float:
+    if audio.size == 0:
+        return 0.0
+    silent = np.abs(audio) <= SILENCE_THRESHOLD
+    longest = 0
+    current = 0
+    for is_silent in silent:
+        if is_silent:
+            current += 1
+            longest = max(longest, current)
+        else:
+            current = 0
+    return longest / sample_rate
+
+
+def analyze_audio_array(audio: np.ndarray, sample_rate: int = SAMPLE_RATE) -> AudioReport:
+    issues: list[AudioIssue] = []
+    duration = audio.size / sample_rate if sample_rate > 0 else 0.0
+    if audio.size == 0:
+        issues.append(AudioIssue("ERROR", "empty_audio", "音声データが空です。", 0))
+        return AudioReport(status=report_status(issues), duration=duration, issues=issues)
+
+    peak = float(np.max(np.abs(audio)))
+    rms = float(np.sqrt(np.mean(np.square(audio))))
+    peak_db = dbfs(peak)
+    rms_db = dbfs(rms)
+    clipped_count = int(np.count_nonzero(np.abs(audio) >= CLIP_THRESHOLD))
+    silence_sec = longest_silence_duration(audio, sample_rate)
+    loop_gap = float(abs(audio[0] - audio[-1])) if audio.size > 1 else 0.0
+
+    if clipped_count > 0:
+        issues.append(
+            AudioIssue("ERROR", "clipping_detected", "クリップしているサンプルがあります。", clipped_count)
+        )
+    if peak_db is not None and peak_db > LOUD_PEAK_DB:
+        issues.append(AudioIssue("WARN", "too_loud_peak", "ピーク音量が高すぎます。", round(peak_db, 2)))
+    if rms_db is None or rms_db < QUIET_RMS_DB:
+        issues.append(AudioIssue("WARN", "too_quiet_rms", "RMS音量が小さすぎます。", None if rms_db is None else round(rms_db, 2)))
+    if silence_sec >= LONG_SILENCE_SEC:
+        issues.append(AudioIssue("WARN", "too_long_silence", "長い無音区間があります。", round(silence_sec, 3)))
+    if loop_gap >= LOOP_EDGE_GAP_WARN:
+        issues.append(AudioIssue("WARN", "loop_click_risk", "先頭と末尾の差分が大きく、ループ時にクリックノイズが出る可能性があります。", round(loop_gap, 3)))
+
+    return AudioReport(
+        status=report_status(issues),
+        duration=duration,
+        peak_db=None if peak_db is None else round(peak_db, 2),
+        rms_db=None if rms_db is None else round(rms_db, 2),
+        issues=issues,
+    )
+
+
+def lint_note_events(events: Sequence[NoteEvent]) -> AudioReport:
+    issues: list[AudioIssue] = []
+    midi_values: list[int] = []
+    previous_midi: int | None = None
+
+    for index, event in enumerate(events):
+        if event.duration < MIN_NOTE_DURATION_SEC:
+            issues.append(AudioIssue("WARN", "note_too_short", f"#{index} の音長が短すぎます。", round(event.duration, 4)))
+        if event.duration > MAX_NOTE_DURATION_SEC:
+            issues.append(AudioIssue("WARN", "note_too_long", f"#{index} の音長が長すぎます。", round(event.duration, 3)))
+        if event.frequency is None:
+            continue
+        if event.frequency <= 0:
+            issues.append(AudioIssue("ERROR", "invalid_frequency", f"#{index} の周波数が不正です。", event.frequency))
+            continue
+
+        midi = freq_to_midi(event.frequency)
+        midi_values.append(midi)
+        if midi < NOTE_HARD_LOW_MIDI:
+            issues.append(AudioIssue("ERROR", "note_below_hard_limit", f"#{index} の音域が低すぎます。", midi_to_note_label(midi)))
+        if midi > NOTE_HARD_HIGH_MIDI:
+            issues.append(AudioIssue("ERROR", "note_above_hard_limit", f"#{index} の音域が高すぎます。", midi_to_note_label(midi)))
+        if previous_midi is not None and abs(midi - previous_midi) > MAX_NOTE_JUMP_SEMITONES:
+            issues.append(
+                AudioIssue(
+                    "WARN",
+                    "note_jump_too_large",
+                    f"#{index - 1} から #{index} の音程ジャンプが大きすぎます。",
+                    f"{midi_to_note_label(previous_midi)} -> {midi_to_note_label(midi)}",
+                )
+            )
+        previous_midi = midi
+
+    note_range = None
+    if midi_values:
+        note_range = f"{midi_to_note_label(min(midi_values))} - {midi_to_note_label(max(midi_values))}"
+
+    return AudioReport(status=report_status(issues), note_range=note_range, issues=issues)
+
+
+def audio_report_to_dict(report: AudioReport) -> dict[str, object]:
+    return {
+        "status": report.status,
+        "duration": report.duration,
+        "peak_db": report.peak_db,
+        "rms_db": report.rms_db,
+        "note_range": report.note_range,
+        "issues": [
+            {
+                "level": issue.level,
+                "code": issue.code,
+                "message": issue.message,
+                "value": issue.value,
+            }
+            for issue in report.issues
+        ],
+    }
+
+
+def format_report_text(report: AudioReport) -> str:
+    lines = ["OnGen Audio Lint Report", "", f"status: {report.status}"]
+    if report.duration is not None:
+        lines.append(f"duration: {report.duration:.2f} sec")
+    if report.peak_db is not None:
+        lines.append(f"peak_db: {report.peak_db:.2f} dB")
+    if report.rms_db is not None:
+        lines.append(f"rms_db: {report.rms_db:.2f} dB")
+    if report.note_range is not None:
+        lines.append(f"note_range: {report.note_range}")
+    if report.issues:
+        lines.append("issues:")
+        for issue in report.issues:
+            suffix = "" if issue.value is None else f" ({issue.value})"
+            lines.append(f"  - {issue.level} {issue.code}: {issue.message}{suffix}")
+    return "\n".join(lines)
+
+
+def write_report_json(path: Path, report: AudioReport) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        json.dumps(audio_report_to_dict(report), ensure_ascii=False, indent=2) + "\n",
+        encoding="utf-8",
+    )
+
+
 def resolve_output_path(path_text: str) -> Path:
     path = Path(path_text)
     if len(path.parts) == 1:
@@ -770,6 +985,7 @@ class ParsedMMLTrack:
     channel: str
     events: list[NoteEvent]
     synth_overrides: dict[str, object]
+    metadata: dict[str, str] = field(default_factory=dict)
 
 
 @dataclass
@@ -798,6 +1014,42 @@ def mml_length_to_seconds(length: int, dotted: int, tempo: int) -> float:
     for _ in range(dotted):
         multiplier += 0.5 * (0.5 ** _)
     return unit * multiplier
+
+
+def parse_mml_meter(value: str) -> tuple[int, int]:
+    match = re.fullmatch(r"\s*(\d+)\s*/\s*(\d+)\s*", value)
+    if not match:
+        raise ValueError(f"MML拍子メタ情報の形式が不正です: {value}")
+    numerator = int(match.group(1))
+    denominator = int(match.group(2))
+    if numerator <= 0 or denominator <= 0:
+        raise ValueError(f"MML拍子メタ情報は正の値を指定してください: {value}")
+    return numerator, denominator
+
+
+def mml_measure_duration_seconds(meter: str, tempo: int) -> float:
+    numerator, denominator = parse_mml_meter(meter)
+    quarter = 60.0 / max(tempo, 1)
+    return numerator * quarter * (4.0 / denominator)
+
+
+def parse_mml_metadata(text: str) -> dict[str, str]:
+    metadata: dict[str, str] = {}
+    for raw_line in text.splitlines():
+        line = raw_line.split(";", 1)[0].strip()
+        if not line.startswith("#"):
+            continue
+        match = re.match(r"#([A-Za-z][A-Za-z0-9_-]*)\s*(.*)$", line)
+        if not match:
+            continue
+        key = match.group(1).upper()
+        value = match.group(2).strip()
+        if key in {"METER", "TIME"}:
+            parse_mml_meter(value)
+            metadata["meter"] = value.replace(" ", "")
+        elif key == "TITLE" and value:
+            metadata["title"] = value
+    return metadata
 
 
 def mml_volume_to_gain(volume: int) -> float:
@@ -991,6 +1243,7 @@ def parse_mml_source(
     pyxel_multipart: bool = False,
 ) -> list[ParsedMMLTrack]:
     default_config = default_config or SynthConfig()
+    metadata = parse_mml_metadata(text)
     if dialect.lower() == "pyxel":
         if pyxel_multipart:
             parts = split_pyxel_multipart_lines(text)
@@ -1001,6 +1254,7 @@ def parse_mml_source(
                     channel=str(index),
                     events=parse_pyxel_mml(part, default_config, max_repeat=max_repeat),
                     synth_overrides={},
+                    metadata=metadata,
                 )
                 for index, part in enumerate(parts, start=1)
             ]
@@ -1009,6 +1263,7 @@ def parse_mml_source(
                 channel="",
                 events=parse_pyxel_mml(text, default_config, max_repeat=max_repeat),
                 synth_overrides={},
+                metadata=metadata,
             )
         ]
 
@@ -1019,6 +1274,7 @@ def parse_mml_source(
                 channel="",
                 events=parse_mml(text, default_config),
                 synth_overrides={},
+                metadata=metadata,
             )
         ]
 
@@ -1030,6 +1286,7 @@ def parse_mml_source(
                 channel=channel,
                 events=parse_mml(split[channel], default_config, channel=channel),
                 synth_overrides=overrides,
+                metadata=metadata,
             )
         )
     return tracks
@@ -2668,6 +2925,11 @@ def create_parser() -> argparse.ArgumentParser:
         help="合成音に重ねる WAV。形式: path[:offset秒[:gain]]",
     )
     parser.add_argument("--list-presets", action="store_true", help="プリセット一覧を表示")
+    parser.add_argument("--lint", action="store_true", help="生成前の楽譜イベント列を検査")
+    parser.add_argument("--analyze", action="store_true", help="生成後の波形を検査")
+    parser.add_argument("--report-json", help="Lint/解析レポートをJSONで保存")
+    parser.add_argument("--fail-on-warn", action="store_true", help="WARN以上の検査結果があれば終了コードを1にする")
+    parser.add_argument("--fail-on-error", action="store_true", help="ERROR以上の検査結果があれば終了コードを1にする")
     parser.add_argument(
         "--play",
         action="store_true",
@@ -2712,6 +2974,17 @@ def main(argv: Sequence[str] | None = None) -> int:
             overlay, offset, gain = parse_overlay_spec(spec, config.sample_root)
             audio = mix_at_offset(audio, overlay, offset, gain)
         audio = apply_master_fade(audio, args.fade_in)
+        reports: list[AudioReport] = []
+        if args.lint:
+            all_events = [
+                event
+                for track_events, _ in track_specs
+                for event in track_events
+            ]
+            reports.append(lint_note_events(all_events))
+        if args.analyze:
+            reports.append(analyze_audio_array(audio, SAMPLE_RATE))
+        report = merge_reports(reports) if reports else None
         output_stem = resolve_output_stem(args.output)
         written = write_audio_files(
             audio,
@@ -2737,6 +3010,12 @@ def main(argv: Sequence[str] | None = None) -> int:
         suffix = f" [{', '.join(extras)}]" if extras else ""
         files_text = ", ".join(str(path) for path in written)
         print(f"出力完了: {files_text} ({duration_sec:.2f}s, {total_events} イベント){suffix}")
+        if report is not None:
+            print(format_report_text(report))
+        if args.report_json:
+            if report is None:
+                report = analyze_audio_array(audio, SAMPLE_RATE)
+            write_report_json(Path(args.report_json), report)
 
         if args.play:
             ensure_ffplay()
@@ -2752,6 +3031,11 @@ def main(argv: Sequence[str] | None = None) -> int:
                 finally:
                     temp_wav_path.unlink(missing_ok=True)
 
+        if report is not None:
+            if args.fail_on_warn and report.status in {"WARN", "ERROR"}:
+                return 1
+            if args.fail_on_error and report.status == "ERROR":
+                return 1
         return 0
     except Exception as exc:
         print(f"エラー: {exc}", file=sys.stderr)
