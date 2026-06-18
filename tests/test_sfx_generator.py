@@ -68,6 +68,9 @@ PPMCK_CHANNEL_MAP = sg.PPMCK_CHANNEL_MAP
 play_audio = sg.play_audio
 synthesize_note = sg.synthesize_note
 synthesize_sequence = sg.synthesize_sequence
+lint_structure = sg.lint_structure
+StructureReport = sg.StructureReport
+StructureIssue = sg.StructureIssue
 __version__ = sg.__version__
 
 
@@ -1304,6 +1307,187 @@ class MmlPyxelCompatTests(unittest.TestCase):
         )
         pitched = [event for event in events if event.frequency is not None]
         self.assertGreaterEqual(len(pitched), 3)
+
+
+class StructureLintTests(unittest.TestCase):
+    def _make_track(self, mml: str, channel: str = "") -> object:
+        tracks = parse_mml_source(mml)
+        if channel:
+            for t in tracks:
+                if t.channel == channel:
+                    return t
+        return tracks[0]
+
+    def test_structure_lint_accepts_meter_aligned_mml(self) -> None:
+        # 4/4拍子・T120で4小節ぴったりのMML
+        mml = "#METER 4/4\nO4 L4 T120\nC D E F C D E F C D E F C D E F\n"
+        tracks = parse_mml_source(mml)
+        report = lint_structure(tracks)
+        self.assertEqual(report.status, "OK")
+        self.assertEqual(report.meter, "4/4")
+        self.assertIsNotNone(report.ticks_per_measure)
+        self.assertEqual(report.ticks_per_measure, 1920)
+        self.assertEqual(report.measures, 4)
+        codes = {i.code for i in report.issues}
+        self.assertNotIn("measure_boundary_mismatch", codes)
+
+    def test_structure_lint_reports_missing_meter(self) -> None:
+        mml = "O4 L4 T120 C D E F\n"
+        tracks = parse_mml_source(mml)
+        report = lint_structure(tracks)
+        codes = {i.code for i in report.issues}
+        self.assertIn("missing_meter", codes)
+
+    def test_structure_lint_reports_measure_boundary_mismatch(self) -> None:
+        # 4/4拍子・T120で4分音符3つ（3/4拍）—小節境界ずれ
+        mml = "#METER 4/4\nO4 L4 T120 C D E\n"
+        tracks = parse_mml_source(mml)
+        report = lint_structure(tracks)
+        codes = {i.code for i in report.issues}
+        self.assertIn("measure_boundary_mismatch", codes)
+
+    def test_structure_lint_reports_track_length_mismatch(self) -> None:
+        # カエルのうたデュエット: トラックAは8小節・Bは9小節
+        mml_path = ROOT / "scores" / "kaeru_no_uta_duet.mml"
+        tracks = parse_mml_source(mml_path.read_text(encoding="utf-8"))
+        report = lint_structure(tracks)
+        codes = {i.code for i in report.issues}
+        self.assertIn("track_measure_count_mismatch", codes)
+        mismatch = next(i for i in report.issues if i.code == "track_measure_count_mismatch")
+        self.assertEqual(mismatch.expected, 15360)  # 8 measures × 1920 ticks
+        self.assertEqual(mismatch.actual, 17280)    # 9 measures × 1920 ticks
+
+    def test_structure_lint_accepts_kaeru_one_measure_delay(self) -> None:
+        # カエルのうた: 各トラック単体は小節境界に合っている（boundary_mismatch なし）
+        mml_path = ROOT / "scores" / "kaeru_no_uta_duet.mml"
+        tracks = parse_mml_source(mml_path.read_text(encoding="utf-8"))
+        report = lint_structure(tracks)
+        codes = {i.code for i in report.issues}
+        self.assertNotIn("measure_boundary_mismatch", codes)
+
+    def test_structure_lint_serializes_json_report(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            output = str(Path(tmpdir) / "structure_sample")
+            report_path = str(Path(tmpdir) / "report.json")
+            exit_code = main([
+                "--input-file", str(ROOT / "scores" / "kaeru_no_uta_duet.mml"),
+                "--structure-lint",
+                "--report-json", report_path,
+                "-o", output,
+            ])
+            self.assertEqual(exit_code, 0)
+            data = json.loads(Path(report_path).read_text(encoding="utf-8"))
+            self.assertIn("structure", data)
+            sr = data["structure"]
+            self.assertEqual(sr["meter"], "4/4")
+            self.assertEqual(sr["ticks_per_measure"], 1920)
+            issues_codes = {i["code"] for i in sr["issues"]}
+            self.assertIn("track_measure_count_mismatch", issues_codes)
+
+    def test_structure_lint_phase2_no_meter_detects_track_length_mismatch(self) -> None:
+        # ppmck_phase3_sample は #METER なし・4トラックで総尺がすべて異なる
+        mml_path = ROOT / "scores" / "ppmck_phase3_sample.mml"
+        tracks = parse_mml_source(mml_path.read_text(encoding="utf-8"))
+        report = lint_structure(tracks)
+        codes = {i.code for i in report.issues}
+        self.assertIn("track_length_mismatch", codes)
+        self.assertIn("missing_meter", codes)
+        mismatch = next(i for i in report.issues if i.code == "track_length_mismatch")
+        self.assertEqual(mismatch.expected, 720)   # Track B: 最短
+        self.assertEqual(mismatch.actual, 2880)    # Track C: 最長
+
+    def test_structure_lint_phase2_track_measures_populated(self) -> None:
+        # kaeru: メーターあり → track_measures に {"A": 8, "B": 9} が入る
+        mml_path = ROOT / "scores" / "kaeru_no_uta_duet.mml"
+        tracks = parse_mml_source(mml_path.read_text(encoding="utf-8"))
+        report = lint_structure(tracks)
+        self.assertEqual(report.track_measures.get("A"), 8)
+        self.assertEqual(report.track_measures.get("B"), 9)
+
+    def test_structure_lint_phase2_track_measure_count_message_includes_tracks(self) -> None:
+        # track_measure_count_mismatch のメッセージにトラック名と小節数が含まれる
+        mml_path = ROOT / "scores" / "kaeru_no_uta_duet.mml"
+        tracks = parse_mml_source(mml_path.read_text(encoding="utf-8"))
+        report = lint_structure(tracks)
+        mismatch = next(i for i in report.issues if i.code == "track_measure_count_mismatch")
+        self.assertIn("A", mismatch.message)
+        self.assertIn("B", mismatch.message)
+
+    def test_structure_lint_phase2_json_includes_track_measures(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            output = str(Path(tmpdir) / "track_measures_sample")
+            report_path = str(Path(tmpdir) / "report.json")
+            exit_code = main([
+                "--input-file", str(ROOT / "scores" / "kaeru_no_uta_duet.mml"),
+                "--structure-lint",
+                "--report-json", report_path,
+                "-o", output,
+            ])
+            self.assertEqual(exit_code, 0)
+            data = json.loads(Path(report_path).read_text(encoding="utf-8"))
+            sr = data["structure"]
+            self.assertIn("track_measures", sr)
+            self.assertEqual(sr["track_measures"]["A"], 8)
+            self.assertEqual(sr["track_measures"]["B"], 9)
+
+    def test_structure_lint_phase3_aligned_loop_no_issue(self) -> None:
+        # 小節境界に合ったループ: 開始 tick=0, 本体=1920 tick (1小節)
+        mml = "#METER 4/4\nO4 L4 T120 [C D E F]2\n"
+        tracks = parse_mml_source(mml)
+        self.assertEqual(len(tracks[0].loop_segments), 1)
+        seg = tracks[0].loop_segments[0]
+        self.assertEqual(seg.start_ticks, 0)
+        self.assertEqual(seg.segment_ticks, 1920)
+        report = lint_structure(tracks)
+        codes = {i.code for i in report.issues}
+        self.assertNotIn("loop_boundary_mismatch", codes)
+
+    def test_structure_lint_phase3_misaligned_loop_body(self) -> None:
+        # 本体が 3/4 小節（1440 tick）のループ → loop_boundary_mismatch
+        mml = "#METER 4/4\nO4 L4 T120 [C D E]2\n"
+        tracks = parse_mml_source(mml)
+        self.assertEqual(tracks[0].loop_segments[0].segment_ticks, 1440)
+        report = lint_structure(tracks)
+        codes = {i.code for i in report.issues}
+        self.assertIn("loop_boundary_mismatch", codes)
+        issue = next(i for i in report.issues if i.code == "loop_boundary_mismatch")
+        self.assertEqual(issue.actual, 1440)
+        self.assertEqual(issue.expected, 1920)  # 最近傍の小節境界 = 1小節
+
+    def test_structure_lint_phase3_misaligned_loop_start(self) -> None:
+        # ループ開始が小節途中（480 tick = 1拍目）→ loop_boundary_mismatch
+        mml = "#METER 4/4\nO4 L4 T120 C [D E F G]2\n"
+        tracks = parse_mml_source(mml)
+        self.assertEqual(tracks[0].loop_segments[0].start_ticks, 480)
+        report = lint_structure(tracks)
+        codes = {i.code for i in report.issues}
+        self.assertIn("loop_boundary_mismatch", codes)
+        issue = next(i for i in report.issues if i.code == "loop_boundary_mismatch")
+        self.assertEqual(issue.actual, 480)
+        self.assertEqual(issue.expected, 0)  # 最近傍の小節境界 = 0
+
+    def test_structure_lint_phase3_no_loop_no_issue(self) -> None:
+        # ループなし → loop_segments が空で loop_boundary_mismatch も出ない
+        mml = "#METER 4/4\nO4 L4 T120 C D E F\n"
+        tracks = parse_mml_source(mml)
+        self.assertEqual(len(tracks[0].loop_segments), 0)
+        report = lint_structure(tracks)
+        codes = {i.code for i in report.issues}
+        self.assertNotIn("loop_boundary_mismatch", codes)
+
+    def test_structure_lint_does_not_add_structure_field_without_flag(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            output = str(Path(tmpdir) / "no_structure")
+            report_path = str(Path(tmpdir) / "report.json")
+            exit_code = main([
+                "--input-file", str(ROOT / "scores" / "kaeru_no_uta_duet.mml"),
+                "--lint",
+                "--report-json", report_path,
+                "-o", output,
+            ])
+            self.assertEqual(exit_code, 0)
+            data = json.loads(Path(report_path).read_text(encoding="utf-8"))
+            self.assertNotIn("structure", data)
 
 
 if __name__ == "__main__":

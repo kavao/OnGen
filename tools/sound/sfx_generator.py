@@ -39,6 +39,9 @@ MAX_NOTE_JUMP_SEMITONES = 24
 NOTE_HARD_LOW_MIDI = 12
 NOTE_HARD_HIGH_MIDI = 108
 LOOP_EDGE_GAP_WARN = 0.25
+QUARTER_TICKS = 480
+STRUCTURE_DEFAULT_TEMPO = 120
+STRUCTURE_TICK_TOLERANCE = 2
 
 NOTE_NAMES = ("C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B")
 NOTE_ALIASES = {
@@ -193,6 +196,44 @@ class AudioIssue:
 
 
 @dataclass
+class StructureIssue:
+    level: str
+    code: str
+    message: str
+    track: str | None = None
+    measure: int | None = None
+    expected: int | float | str | None = None
+    actual: int | float | str | None = None
+
+
+@dataclass
+class StructureReport:
+    status: str
+    meter: str | None = None
+    ticks_per_measure: int | None = None
+    measures: int | None = None
+    track_measures: dict[str, int] = field(default_factory=dict)
+    issues: list[StructureIssue] = field(default_factory=list)
+
+
+@dataclass(frozen=True)
+class LoopSegmentInfo:
+    """MML ループセグメントの位置情報（構造Lint Phase 3 用）。"""
+    start_ticks: int       # ループ開始位置（展開前のトラック累積 tick）
+    segment_ticks: int     # ループ本体の tick 数（1回分）
+    repeat: int            # 繰り返し回数
+
+
+@dataclass
+class TimedStructureEvent:
+    """将来フェーズ用。小節境界・ループ検査で使う tick ベースのイベント。"""
+    track: str
+    start_tick: int
+    duration_ticks: int
+    frequency: float | None
+
+
+@dataclass
 class AudioReport:
     status: str
     duration: float | None = None
@@ -200,6 +241,7 @@ class AudioReport:
     rms_db: float | None = None
     note_range: str | None = None
     issues: list[AudioIssue] = field(default_factory=list)
+    structure: StructureReport | None = None
 
 
 def midi_to_freq(midi: int) -> float:
@@ -824,8 +866,159 @@ def lint_note_events(events: Sequence[NoteEvent]) -> AudioReport:
     return AudioReport(status=report_status(issues), note_range=note_range, issues=issues)
 
 
-def audio_report_to_dict(report: AudioReport) -> dict[str, object]:
+def _structure_status(issues: list[StructureIssue]) -> str:
+    if any(i.level == "ERROR" for i in issues):
+        return "ERROR"
+    if any(i.level == "WARN" for i in issues):
+        return "WARN"
+    return "OK"
+
+
+def _seconds_to_ticks(seconds: float, tempo: int = STRUCTURE_DEFAULT_TEMPO) -> int:
+    # Phase 1: 一定テンポ前提。テンポ変化には対応しない。
+    return round(seconds * QUARTER_TICKS * tempo / 60)
+
+
+def lint_structure(tracks: list[ParsedMMLTrack]) -> StructureReport:
+    if not tracks:
+        return StructureReport(status="OK")
+
+    metadata = tracks[0].metadata
+    meter = metadata.get("meter")
+    issues: list[StructureIssue] = []
+
+    # トラックごとの tick 合計（メーター有無に関わらず計算）
+    track_tick_totals: list[tuple[str, int]] = []
+    for track in tracks:
+        total_ticks = _seconds_to_ticks(sum(e.duration for e in track.events))
+        label = track.channel or "(メイン)"
+        track_tick_totals.append((label, total_ticks))
+
+    if not meter:
+        # メーターなしでも複数トラックの総尺差は検出する
+        if len(track_tick_totals) > 1:
+            tick_values = [t for _, t in track_tick_totals]
+            if max(tick_values) - min(tick_values) > STRUCTURE_TICK_TOLERANCE:
+                detail = ", ".join(f"{ch}: {t} tick" for ch, t in track_tick_totals)
+                issues.append(StructureIssue(
+                    level="WARN",
+                    code="track_length_mismatch",
+                    message=f"トラック間の総尺が一致しません（{detail}）。",
+                    expected=min(tick_values),
+                    actual=max(tick_values),
+                ))
+        issues.append(StructureIssue(
+            level="WARN",
+            code="missing_meter",
+            message="拍子メタ情報 (#METER / #TIME) がありません。小節境界の検査をスキップします。",
+        ))
+        return StructureReport(status=_structure_status(issues), issues=issues)
+
+    try:
+        numerator, denominator = parse_mml_meter(meter)
+    except ValueError as exc:
+        return StructureReport(
+            status="ERROR",
+            meter=meter,
+            issues=[StructureIssue(level="ERROR", code="invalid_meter", message=str(exc))],
+        )
+
+    ticks_per_measure = numerator * QUARTER_TICKS * 4 // denominator
+    track_measures: dict[str, int] = {}
+
+    for label, total_ticks in track_tick_totals:
+        measure_count = round(total_ticks / ticks_per_measure) if ticks_per_measure > 0 else 0
+        track_measures[label] = measure_count
+
+        remainder = total_ticks % ticks_per_measure
+        deviation = min(remainder, ticks_per_measure - remainder)
+        if deviation > STRUCTURE_TICK_TOLERANCE:
+            nearest = measure_count
+            issues.append(StructureIssue(
+                level="WARN",
+                code="measure_boundary_mismatch",
+                message=f"トラック {label} の終端が小節境界に合っていません。",
+                track=label if label != "(メイン)" else None,
+                expected=nearest * ticks_per_measure,
+                actual=total_ticks,
+            ))
+
+        # ループ境界チェック（Phase 3）
+        track_label = label if label != "(メイン)" else None
+        for seg in track.loop_segments:
+            start_rem = seg.start_ticks % ticks_per_measure
+            if min(start_rem, ticks_per_measure - start_rem) > STRUCTURE_TICK_TOLERANCE:
+                nearest_start = round(seg.start_ticks / ticks_per_measure)
+                issues.append(StructureIssue(
+                    level="WARN",
+                    code="loop_boundary_mismatch",
+                    message=f"トラック {label} のループ開始位置（{seg.start_ticks} tick）が小節境界に合っていません。",
+                    track=track_label,
+                    expected=nearest_start * ticks_per_measure,
+                    actual=seg.start_ticks,
+                ))
+            seg_rem = seg.segment_ticks % ticks_per_measure
+            if min(seg_rem, ticks_per_measure - seg_rem) > STRUCTURE_TICK_TOLERANCE:
+                nearest_seg = round(seg.segment_ticks / ticks_per_measure)
+                issues.append(StructureIssue(
+                    level="WARN",
+                    code="loop_boundary_mismatch",
+                    message=f"トラック {label} のループ本体（{seg.segment_ticks} tick）が小節境界に合っていません。",
+                    track=track_label,
+                    expected=nearest_seg * ticks_per_measure,
+                    actual=seg.segment_ticks,
+                ))
+
+    if len(track_tick_totals) > 1:
+        measure_counts = list(track_measures.values())
+        if len(set(measure_counts)) > 1:
+            min_m = min(measure_counts)
+            max_m = max(measure_counts)
+            detail = ", ".join(f"{ch}: {m}小節" for ch, m in track_measures.items())
+            issues.append(StructureIssue(
+                level="WARN",
+                code="track_measure_count_mismatch",
+                message=f"トラック間の小節数が一致しません（{detail}）。",
+                expected=min_m * ticks_per_measure,
+                actual=max_m * ticks_per_measure,
+            ))
+
+    overall_measures = max(track_measures.values()) if track_measures else None
+
+    return StructureReport(
+        status=_structure_status(issues),
+        meter=meter,
+        ticks_per_measure=ticks_per_measure,
+        measures=overall_measures,
+        track_measures=track_measures,
+        issues=issues,
+    )
+
+
+def structure_report_to_dict(sr: StructureReport) -> dict[str, object]:
     return {
+        "status": sr.status,
+        "meter": sr.meter,
+        "ticks_per_measure": sr.ticks_per_measure,
+        "measures": sr.measures,
+        "track_measures": sr.track_measures,
+        "issues": [
+            {
+                "level": i.level,
+                "code": i.code,
+                "message": i.message,
+                "track": i.track,
+                "measure": i.measure,
+                "expected": i.expected,
+                "actual": i.actual,
+            }
+            for i in sr.issues
+        ],
+    }
+
+
+def audio_report_to_dict(report: AudioReport) -> dict[str, object]:
+    d: dict[str, object] = {
         "status": report.status,
         "duration": report.duration,
         "peak_db": report.peak_db,
@@ -841,6 +1034,9 @@ def audio_report_to_dict(report: AudioReport) -> dict[str, object]:
             for issue in report.issues
         ],
     }
+    if report.structure is not None:
+        d["structure"] = structure_report_to_dict(report.structure)
+    return d
 
 
 def format_report_text(report: AudioReport) -> str:
@@ -858,6 +1054,19 @@ def format_report_text(report: AudioReport) -> str:
         for issue in report.issues:
             suffix = "" if issue.value is None else f" ({issue.value})"
             lines.append(f"  - {issue.level} {issue.code}: {issue.message}{suffix}")
+    if report.structure is not None:
+        sr = report.structure
+        lines.append("")
+        lines.append(f"structure_status: {sr.status}")
+        if sr.meter:
+            lines.append(f"structure_meter: {sr.meter}")
+        if sr.measures is not None:
+            lines.append(f"structure_measures: {sr.measures}")
+        if sr.issues:
+            lines.append("structure_issues:")
+            for si in sr.issues:
+                track_info = f" [track={si.track}]" if si.track else ""
+                lines.append(f"  - {si.level} {si.code}: {si.message}{track_info}")
     return "\n".join(lines)
 
 
@@ -1080,6 +1289,7 @@ class ParsedMMLTrack:
     events: list[NoteEvent]
     synth_overrides: dict[str, object]
     metadata: dict[str, str] = field(default_factory=dict)
+    loop_segments: list[LoopSegmentInfo] = field(default_factory=list)
 
 
 @dataclass
@@ -1427,24 +1637,28 @@ def parse_mml_source(
 
     split = split_ppmck_tracks(text)
     if split is None:
+        _loop_segs: list[LoopSegmentInfo] = []
         return [
             ParsedMMLTrack(
                 channel="",
-                events=parse_mml(text, default_config),
+                events=parse_mml(text, default_config, _loop_segments=_loop_segs),
                 synth_overrides={},
                 metadata=metadata,
+                loop_segments=_loop_segs,
             )
         ]
 
     tracks: list[ParsedMMLTrack] = []
     for channel in split:
         overrides = dict(PPMCK_CHANNEL_MAP.get(channel, {}))
+        _loop_segs = []
         tracks.append(
             ParsedMMLTrack(
                 channel=channel,
-                events=parse_mml(split[channel], default_config, channel=channel),
+                events=parse_mml(split[channel], default_config, channel=channel, _loop_segments=_loop_segs),
                 synth_overrides=overrides,
                 metadata=metadata,
+                loop_segments=_loop_segs,
             )
         )
     return tracks
@@ -1523,6 +1737,7 @@ def parse_mml(
     default_config: SynthConfig | None = None,
     *,
     channel: str | None = None,
+    _loop_segments: list[LoopSegmentInfo] | None = None,
 ) -> list[NoteEvent]:
     default_config = default_config or SynthConfig()
     state = MMLState()
@@ -1655,6 +1870,14 @@ def parse_mml(
                 continue
             start_idx, saved_state = loop_stack.pop()
             segment = events[start_idx:]
+            if _loop_segments is not None:
+                pre_ticks = _seconds_to_ticks(sum(e.duration for e in events[:start_idx]))
+                seg_ticks = _seconds_to_ticks(sum(e.duration for e in segment))
+                _loop_segments.append(LoopSegmentInfo(
+                    start_ticks=pre_ticks,
+                    segment_ticks=seg_ticks,
+                    repeat=repeat,
+                ))
             events = events[:start_idx]
             for _ in range(repeat):
                 events.extend(segment)
@@ -3121,6 +3344,7 @@ def create_parser() -> argparse.ArgumentParser:
     parser.add_argument("--list-presets", action="store_true", help="プリセット一覧を表示")
     parser.add_argument("--lint", action="store_true", help="生成前の楽譜イベント列を検査")
     parser.add_argument("--analyze", action="store_true", help="生成後の波形を検査")
+    parser.add_argument("--structure-lint", action="store_true", help="楽曲構造を検査（拍子・小節境界・トラック同期）。MML形式のみ対応。Phase 1 は一定テンポ前提。")
     parser.add_argument("--report-json", help="Lint/解析レポートをJSONで保存")
     parser.add_argument("--fail-on-warn", action="store_true", help="WARN以上の検査結果があれば終了コードを1にする")
     parser.add_argument("--fail-on-error", action="store_true", help="ERROR以上の検査結果があれば終了コードを1にする")
@@ -3179,6 +3403,20 @@ def main(argv: Sequence[str] | None = None) -> int:
         if args.analyze:
             reports.append(analyze_audio_array(audio, SAMPLE_RATE))
         report = merge_reports(reports) if reports else None
+
+        if args.structure_lint:
+            _is_abc = args.abc or (args.format and args.format.lower() == "abc")
+            if not _is_abc and input_text.strip():
+                _mml_kw = _mml_kwargs_from_args(args)
+                _structure_tracks = parse_mml_source(input_text, config, **_mml_kw)
+                _sr = lint_structure(_structure_tracks)
+                if report is None:
+                    report = AudioReport(status=_sr.status, structure=_sr)
+                else:
+                    _combined = "ERROR" if "ERROR" in (report.status, _sr.status) else (
+                        "WARN" if "WARN" in (report.status, _sr.status) else "OK"
+                    )
+                    report = replace(report, status=_combined, structure=_sr)
         output_stem = resolve_output_stem(args.output)
         written = write_audio_files(
             audio,
