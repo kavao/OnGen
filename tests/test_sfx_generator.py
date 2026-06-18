@@ -74,6 +74,8 @@ StructureIssue = sg.StructureIssue
 _parse_canon_spec = sg._parse_canon_spec
 _events_to_tick_notes = sg._events_to_tick_notes
 _measure_note_counts = sg._measure_note_counts
+_estimate_mml_length = sg._estimate_mml_length
+_is_standard_duration = sg._is_standard_duration
 __version__ = sg.__version__
 
 
@@ -1627,6 +1629,101 @@ class StructureLintTests(unittest.TestCase):
             self.assertEqual(exit_code, 0)
             data = json.loads(Path(report_path).read_text(encoding="utf-8"))
             self.assertNotIn("structure", data)
+
+
+class LintEnhancementTests(unittest.TestCase):
+
+    def test_parsed_mml_track_has_tempo_t150(self) -> None:
+        mml = "A O4 L4 T150 C4 D4 E4 F4\nB O4 L4 T120 C4 D4 E4 F4\n"
+        tracks = parse_mml_source(mml)
+        a = next(t for t in tracks if t.channel == "A")
+        b = next(t for t in tracks if t.channel == "B")
+        self.assertEqual(a.tempo, 150)
+        self.assertEqual(b.tempo, 120)
+
+    def test_parsed_mml_track_default_tempo(self) -> None:
+        mml = "O4 L4 C4 D4 E4 F4\n"
+        tracks = parse_mml_source(mml)
+        self.assertEqual(tracks[0].tempo, 120)
+
+    def test_track_tempo_mismatch_detected(self) -> None:
+        mml = "A O4 L4 T150 C4 D4 E4 F4\nB O4 L4 T120 C4 D4 E4 F4\n"
+        tracks = parse_mml_source(mml)
+        report = lint_structure(tracks)
+        codes = {i.code for i in report.issues}
+        self.assertIn("track_tempo_mismatch", codes)
+
+    def test_track_tempo_mismatch_not_reported_same_tempo(self) -> None:
+        mml = "A O4 L4 T150 C4 D4 E4 F4\nB O4 L4 T150 C4 D4 E4 F4\n"
+        tracks = parse_mml_source(mml)
+        report = lint_structure(tracks)
+        codes = {i.code for i in report.issues}
+        self.assertNotIn("track_tempo_mismatch", codes)
+
+    def test_estimate_mml_length_quarter_at_t120(self) -> None:
+        # 四分音符 (0.5s) at T120 → length 4
+        self.assertEqual(_estimate_mml_length(0.5, 120), 4)
+
+    def test_estimate_mml_length_quarter_at_t150(self) -> None:
+        # 四分音符 (0.4s) at T150 → length 4
+        self.assertEqual(_estimate_mml_length(0.4, 150), 4)
+
+    def test_estimate_mml_length_unusual_at_t150(self) -> None:
+        # T150 で音長 5 の音符 (0.32s) → length 5
+        dur = 60.0 / 150 * 4.0 / 5
+        self.assertEqual(_estimate_mml_length(dur, 150), 5)
+
+    def test_is_standard_duration_quarter(self) -> None:
+        self.assertTrue(_is_standard_duration(0.5, 120))   # 四分音符
+        self.assertTrue(_is_standard_duration(0.75, 120))  # 付点四分音符
+
+    def test_is_standard_duration_unusual(self) -> None:
+        dur5 = 60.0 / 150 * 4.0 / 5  # T150 で音長 5
+        self.assertFalse(_is_standard_duration(dur5, 150))
+
+    def test_unusual_note_duration_detected(self) -> None:
+        # T150 で音長 5 の音符が入った MML
+        mml = "#METER 4/4\nO4 T150 c5 d5 e5 f5 c4 d4 e4 f4\n"
+        tracks = parse_mml_source(mml)
+        report = lint_structure(tracks)
+        codes = {i.code for i in report.issues}
+        self.assertIn("unusual_note_duration", codes)
+
+    def test_no_unusual_duration_for_standard_notes(self) -> None:
+        # 標準音価のみ → unusual_note_duration なし（C5 ではなく > C4 を使う）
+        mml = "#METER 4/4\nO4 T120 C4 D4 E4 F4 G4 A4 B4 > C4\n"
+        tracks = parse_mml_source(mml)
+        report = lint_structure(tracks)
+        codes = {i.code for i in report.issues}
+        self.assertNotIn("unusual_note_duration", codes)
+
+    def test_octave_notation_likely_detected(self) -> None:
+        # T150 で音長 5 が 3 個以上連続 → octave_notation_likely
+        mml = "#METER 4/4\nO4 T150 c5 d5 e5 f5 c4 d4 e4 f4\n"
+        tracks = parse_mml_source(mml)
+        report = lint_structure(tracks)
+        codes = {i.code for i in report.issues}
+        self.assertIn("octave_notation_likely", codes)
+
+    def test_tempo_metadata_parsed(self) -> None:
+        text = "#METER 4/4\n#TEMPO 150\nO4 L4 C4 D4 E4 F4\n"
+        meta = parse_mml_metadata(text)
+        self.assertEqual(meta.get("tempo"), "150")
+
+    def test_tempo_metadata_invalid_ignored(self) -> None:
+        text = "#TEMPO 0\n#TEMPO abc\n"
+        meta = parse_mml_metadata(text)
+        self.assertNotIn("tempo", meta)
+
+    def test_structure_lint_tempo_aware_no_false_positive(self) -> None:
+        # T150 で 8 小節（32 quarter）、track.tempo を使うので measure_boundary_mismatch なし
+        # 4 繰り返し × 8 四分音符 = 32 quarter notes × 0.4s = 12.8s → 8 measures
+        mml = "#METER 4/4\nO4 L4 T150 " + "C4 D4 E4 F4 C4 D4 E4 F4 " * 4 + "\n"
+        tracks = parse_mml_source(mml)
+        report = lint_structure(tracks)
+        codes = {i.code for i in report.issues}
+        self.assertNotIn("measure_boundary_mismatch", codes)
+        self.assertEqual(report.measures, 8)
 
 
 if __name__ == "__main__":

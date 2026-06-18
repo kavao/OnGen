@@ -898,27 +898,57 @@ def _parse_canon_spec(value: str) -> tuple[list[str], int] | None:
     return None
 
 
-def _events_to_tick_notes(events: list[NoteEvent]) -> list[tuple[int, float]]:
+def _events_to_tick_notes(
+    events: list[NoteEvent],
+    tempo: int = STRUCTURE_DEFAULT_TEMPO,
+) -> list[tuple[int, float]]:
     """各イベントの開始 tick と周波数を返す（休符・None 周波数は除く）。"""
     result: list[tuple[int, float]] = []
     elapsed = 0.0
     for event in events:
         if event.frequency is not None:
-            result.append((_seconds_to_ticks(elapsed), event.frequency))
+            result.append((_seconds_to_ticks(elapsed, tempo), event.frequency))
         elapsed += event.duration
     return result
 
 
-def _measure_note_counts(events: list[NoteEvent], ticks_per_measure: int) -> dict[int, int]:
+def _measure_note_counts(
+    events: list[NoteEvent],
+    ticks_per_measure: int,
+    tempo: int = STRUCTURE_DEFAULT_TEMPO,
+) -> dict[int, int]:
     """小節インデックス → 音符数（休符除く）のマッピングを返す。"""
     counts: dict[int, int] = {}
     elapsed = 0.0
     for event in events:
         if event.frequency is not None:
-            idx = _seconds_to_ticks(elapsed) // ticks_per_measure
+            idx = _seconds_to_ticks(elapsed, tempo) // ticks_per_measure
             counts[idx] = counts.get(idx, 0) + 1
         elapsed += event.duration
     return counts
+
+
+_STANDARD_MML_LENGTHS = {1, 2, 4, 8, 16, 32, 64}
+_OCTAVE_CONFUSED_LENGTHS = {5, 6, 7}
+_OCTAVE_CONFUSED_RUN_MIN = 3
+
+
+def _estimate_mml_length(duration_sec: float, tempo: int) -> int:
+    """秒単位の音長から MML 音長数値（N 分音符の N）を逆算する。"""
+    beat = 60.0 / max(tempo, 1)
+    return round(beat * 4.0 / max(duration_sec, 1e-9))
+
+
+def _is_standard_duration(duration_sec: float, tempo: int) -> bool:
+    """標準音価（全・2分・4分・8分・16分・32分・64分とその付点）かを判定する。"""
+    beat = 60.0 / max(tempo, 1)
+    tolerance = beat * 4.0 / 64.0 * 0.05  # 64分音符の5%
+    for n in _STANDARD_MML_LENGTHS:
+        base = beat * 4.0 / n
+        for mult in (1.0, 1.5, 1.75):  # 通常・付点・複付点
+            if abs(duration_sec - base * mult) < tolerance:
+                return True
+    return False
 
 
 def lint_structure(tracks: list[ParsedMMLTrack]) -> StructureReport:
@@ -929,12 +959,23 @@ def lint_structure(tracks: list[ParsedMMLTrack]) -> StructureReport:
     meter = metadata.get("meter")
     issues: list[StructureIssue] = []
 
-    # トラックごとの tick 合計（メーター有無に関わらず計算）
+    # トラックごとの tick 合計（各トラックの実テンポを使用）
     track_tick_totals: list[tuple[str, int]] = []
     for track in tracks:
-        total_ticks = _seconds_to_ticks(sum(e.duration for e in track.events))
+        total_ticks = _seconds_to_ticks(sum(e.duration for e in track.events), track.tempo)
         label = track.channel or "(メイン)"
         track_tick_totals.append((label, total_ticks))
+
+    # テンポ不一致チェック（Phase 2）
+    if len(tracks) > 1:
+        track_tempos = {(t.channel or "(メイン)"): t.tempo for t in tracks}
+        if len(set(track_tempos.values())) > 1:
+            detail = ", ".join(f"{ch}: T{t}" for ch, t in track_tempos.items())
+            issues.append(StructureIssue(
+                level="WARN",
+                code="track_tempo_mismatch",
+                message=f"トラック間でテンポが一致しません（{detail}）。テンポを揃えるか、各トラックに T コマンドを明示してください。",
+            ))
 
     if not meter:
         # メーターなしでも複数トラックの総尺差は検出する
@@ -1011,8 +1052,62 @@ def lint_structure(tracks: list[ParsedMMLTrack]) -> StructureReport:
                     actual=seg.segment_ticks,
                 ))
 
+        # 非標準音長チェック・オクターブ記法誤用チェック（Phase 3）
+        confused_run: list[int] = []
+        unusual_lengths_seen: set[int] = set()
+        for ev_idx, ev in enumerate(track.events):
+            if ev.frequency is None:
+                confused_run = []
+                continue
+            est = _estimate_mml_length(ev.duration, track.tempo)
+            if est in _OCTAVE_CONFUSED_LENGTHS:
+                confused_run.append(ev_idx)
+            else:
+                if len(confused_run) >= _OCTAVE_CONFUSED_RUN_MIN:
+                    run_est = _estimate_mml_length(track.events[confused_run[0]].duration, track.tempo)
+                    issues.append(StructureIssue(
+                        level="WARN",
+                        code="octave_notation_likely",
+                        message=(
+                            f"トラック {label} に音長 {run_est} の音符が {len(confused_run)} 個連続しています。"
+                            f" `c{run_est}` は O{run_est} の C ではなく「音長 {run_est} の C」です。"
+                            f" O{run_est} の C を書く場合は `> c4` または `O{run_est} c4` を使ってください。"
+                        ),
+                        track=track_label,
+                        expected=4,
+                        actual=run_est,
+                    ))
+                confused_run = []
+            if not _is_standard_duration(ev.duration, track.tempo) and est not in unusual_lengths_seen:
+                unusual_lengths_seen.add(est)
+                issues.append(StructureIssue(
+                    level="WARN",
+                    code="unusual_note_duration",
+                    message=(
+                        f"トラック {label} に音長 {est} の音符があります（{round(ev.duration, 4)}s）。"
+                        " 標準音価（全・2分・4分・8分・16分・32分・64分とその付点）と一致しません。"
+                        " 三連符として意図した場合は問題ありません。"
+                    ),
+                    track=track_label,
+                    actual=est,
+                ))
+        if len(confused_run) >= _OCTAVE_CONFUSED_RUN_MIN:
+            run_est = _estimate_mml_length(track.events[confused_run[0]].duration, track.tempo)
+            issues.append(StructureIssue(
+                level="WARN",
+                code="octave_notation_likely",
+                message=(
+                    f"トラック {label} に音長 {run_est} の音符が {len(confused_run)} 個連続しています。"
+                    f" `c{run_est}` は O{run_est} の C ではなく「音長 {run_est} の C」です。"
+                    f" O{run_est} の C を書く場合は `> c4` または `O{run_est} c4` を使ってください。"
+                ),
+                track=track_label,
+                expected=4,
+                actual=run_est,
+            ))
+
         # 密度分析（Phase 5）
-        note_counts = _measure_note_counts(track.events, ticks_per_measure)
+        note_counts = _measure_note_counts(track.events, ticks_per_measure, track.tempo)
         filled = sorted(c for c in note_counts.values() if c > 0)
         if len(filled) >= 2:
             median = filled[len(filled) // 2]
@@ -1057,13 +1152,14 @@ def lint_structure(tracks: list[ParsedMMLTrack]) -> StructureReport:
             track_map = {t.channel.upper(): t for t in tracks}
             name_a, name_b = canon_names[0], canon_names[1]
             if name_a in track_map and name_b in track_map:
+                _canon_tempo = track_map[name_a].tempo
                 notes_a = {
                     tick: freq
-                    for tick, freq in _events_to_tick_notes(track_map[name_a].events)
+                    for tick, freq in _events_to_tick_notes(track_map[name_a].events, _canon_tempo)
                 }
                 notes_b = {
                     tick: freq
-                    for tick, freq in _events_to_tick_notes(track_map[name_b].events)
+                    for tick, freq in _events_to_tick_notes(track_map[name_b].events, _canon_tempo)
                 }
                 mismatch_count = sum(
                     1
@@ -1390,6 +1486,7 @@ class ParsedMMLTrack:
     synth_overrides: dict[str, object]
     metadata: dict[str, str] = field(default_factory=dict)
     loop_segments: list[LoopSegmentInfo] = field(default_factory=list)
+    tempo: int = 120
 
 
 @dataclass
@@ -1461,6 +1558,9 @@ def parse_mml_metadata(text: str) -> dict[str, str]:
             metadata["title"] = value
         elif key == "CANON" and value:
             metadata["canon"] = value
+        elif key == "TEMPO" and value:
+            if value.isdigit() and int(value) > 0:
+                metadata["tempo"] = value
     return metadata
 
 
@@ -1740,13 +1840,15 @@ def parse_mml_source(
     split = split_ppmck_tracks(text)
     if split is None:
         _loop_segs: list[LoopSegmentInfo] = []
+        _tempo_out: list[int] = []
         return [
             ParsedMMLTrack(
                 channel="",
-                events=parse_mml(text, default_config, _loop_segments=_loop_segs),
+                events=parse_mml(text, default_config, _loop_segments=_loop_segs, _tempo_out=_tempo_out),
                 synth_overrides={},
                 metadata=metadata,
                 loop_segments=_loop_segs,
+                tempo=_tempo_out[0] if _tempo_out else 120,
             )
         ]
 
@@ -1754,13 +1856,15 @@ def parse_mml_source(
     for channel in split:
         overrides = dict(PPMCK_CHANNEL_MAP.get(channel, {}))
         _loop_segs = []
+        _tempo_out = []
         tracks.append(
             ParsedMMLTrack(
                 channel=channel,
-                events=parse_mml(split[channel], default_config, channel=channel, _loop_segments=_loop_segs),
+                events=parse_mml(split[channel], default_config, channel=channel, _loop_segments=_loop_segs, _tempo_out=_tempo_out),
                 synth_overrides=overrides,
                 metadata=metadata,
                 loop_segments=_loop_segs,
+                tempo=_tempo_out[0] if _tempo_out else 120,
             )
         )
     return tracks
@@ -1840,6 +1944,7 @@ def parse_mml(
     *,
     channel: str | None = None,
     _loop_segments: list[LoopSegmentInfo] | None = None,
+    _tempo_out: list[int] | None = None,
 ) -> list[NoteEvent]:
     default_config = default_config or SynthConfig()
     state = MMLState()
@@ -2141,6 +2246,8 @@ def parse_mml(
                 mml_freq_from_name(name, state.octave, state.transpose),
             )
 
+    if _tempo_out is not None:
+        _tempo_out.append(state.tempo)
     return events
 
 

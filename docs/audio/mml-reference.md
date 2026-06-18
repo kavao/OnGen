@@ -147,3 +147,23 @@ python tools/sound/sfx_generator.py --input "O4 L4 T120 C D E G" --style square 
 ```
 
 ABC 記法は [BGMと楽譜](bgm-and-scores.md) を参照してください。
+
+## よくある誤記
+
+### `c5` はオクターブ5の C ではない
+
+PPMCK MML では、音符直後の数字は**音長**です。
+
+| 書き方 | 意味 |
+|--------|------|
+| `c5` | C note、音長 5（全音符の 1/5、T120 で 0.32s） |
+| `> c4` | C note、四分音符、オクターブを 1 つ上げて演奏（C5） |
+| `O5 c4` | C note、四分音符、オクターブ 5 を明示（C5） |
+
+O4 文脈で C5 を鳴らすには `> c4 <` または `O5 c4 O4` と書きます。
+
+`--structure-lint` を使うと `octave_notation_likely` で誤記の可能性を検出できます。
+
+```bash
+python tools/sound/sfx_generator.py --input-file scores/example.mml --structure-lint -o output/check/example
+```
