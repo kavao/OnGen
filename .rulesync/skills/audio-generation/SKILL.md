@@ -102,6 +102,15 @@ python tools/sound/sfx_generator.py --input-file scores/example.mml --lint --ana
 
 詳細は `docs/audio/quality-check.md`。
 
+楽曲構造検査（拍子・小節・トラック同期・ループ・密度）:
+
+```bash
+# 構造のみ検査
+python tools/sound/sfx_generator.py --input-file scores/example.mml --structure-lint -o output/check/example
+# 楽譜Lint・構造Lint・波形解析を一括実行
+python tools/sound/sfx_generator.py --input-file scores/example.mml --lint --structure-lint --analyze -o output/check/example
+```
+
 ## PPMCK / MCK MML
 
 既定の方言は `ppmck`（`--mml-dialect` 省略時）。
@@ -110,7 +119,8 @@ python tools/sound/sfx_generator.py --input-file scores/example.mml --lint --ana
 |------|------|
 | `c4` | 4分音符 C（音符直後の数字 = 音長） |
 | `O3` / `>` / `<` | オクターブ指定 / 上げ / 下げ |
-| `#METER` / `#TIME` | 拍子メタ情報（再生音ではなく小節確認用） |
+| `#METER` / `#TIME` | 拍子メタ情報。`--structure-lint` と組み合わせると小節境界検査の基準になる |
+| `#CANON A,B,delay=Nbar` | 輪唱宣言。`--structure-lint` で音高列を照合する |
 | `A`〜`E` | トラック宣言（A/B=square、C=triangle、D/E=noise） |
 | `Q<n>` / `@Q<n>` | ゲートタイム / 60fps 換算フレーム短縮 |
 | `K<n>` | 半音単位トランスポーズ |
@@ -180,4 +190,6 @@ Pyxel Composerなどの「1行につき1パート」のテキストは、`--pyxe
 - MMLの音符直後の数字は音長（PPMCK / MCK流）。オクターブは`O`コマンドと相対オクターブ変更`>` / `<`で指定する。詳細・未対応項目は`docs/audio/mml-reference.md`を確認する。
 - 品質判定の細部は `docs/audio/quality-check.md` を参照する。
 - Pyxel 方言は完全一致ではなく簡易近似。PPMCK/MCK マクロも現時点では実用近似であり、完全互換を名乗らない。
+- 構造Lint（`--structure-lint`）は拍子・小節境界・トラック同期・ループ・密度を検査する。音響品質（クリップ・音量・ノイズ）は `--lint --analyze` が担当し、責務が分かれている。
+- `#METER` / `#TIME` がない譜面では `missing_meter` が出るが音源生成は継続される。`--structure-lint` は MML 形式のみ対応（ABC は Phase 1 時点では未対応）。
 - Rulesync生成物（`.agents/skills/audio-generation/` 等）は直接編集しない。正本は `.rulesync/skills/audio-generation/SKILL.md` を更新してから `npx rulesync generate` する。
