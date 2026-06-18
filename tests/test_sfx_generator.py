@@ -32,6 +32,7 @@ FM_TONE_PRESETS = sg.FM_TONE_PRESETS
 LFOConfig = sg.LFOConfig
 MIX_HEADROOM = sg.MIX_HEADROOM
 NoteEvent = sg.NoteEvent
+MacroSequence = sg.MacroSequence
 SFX_PRESETS = sg.SFX_PRESETS
 SynthConfig = sg.SynthConfig
 abc_default_unit_from_meter = sg.abc_default_unit_from_meter
@@ -51,12 +52,14 @@ load_preset = sg.load_preset
 note_name_to_freq = sg.note_name_to_freq
 parse_abc = sg.parse_abc
 parse_mml = sg.parse_mml
+parse_mml_macro_definitions = sg.parse_mml_macro_definitions
 parse_pyxel_mml = sg.parse_pyxel_mml
 parse_mml_metadata = sg.parse_mml_metadata
 parse_mml_by_dialect = sg.parse_mml_by_dialect
 parse_mml_source = sg.parse_mml_source
 mml_measure_duration_seconds = sg.mml_measure_duration_seconds
 report_pyxel_compat_issues = sg.report_pyxel_compat_issues
+render_macro_sequence = sg.render_macro_sequence
 PYXEL_TONE_MAP = sg.PYXEL_TONE_MAP
 resolve_track_specs = sg.resolve_track_specs
 split_ppmck_tracks = sg.split_ppmck_tracks
@@ -172,6 +175,80 @@ class AudioQualityTests(unittest.TestCase):
             audio = synthesize_sequence(events, config)
             self.assertGreater(audio.size, 0)
             self.assertLess(float(np.max(np.abs(audio))), 0.99)
+
+
+class MmlMacroEnvelopeTests(unittest.TestCase):
+    def test_macro_definition_keeps_loop_index(self) -> None:
+        bank = parse_mml_macro_definitions("@v0 = { 15, 14, | 12, 10 }")
+        self.assertEqual(bank.volume[0].values, (15.0, 14.0, 12.0, 10.0))
+        self.assertEqual(bank.volume[0].loop_index, 2)
+
+    def test_unapplied_macro_definition_does_not_emit_events(self) -> None:
+        self.assertEqual(parse_mml("@v0 = { 15, 12, 8 }"), [])
+
+    def test_volume_envelope_changes_rendered_audio(self) -> None:
+        events = parse_mml("@v0 = { 15, 0 }\n@v0 O4 L1 T120 C")
+        self.assertEqual(len(events), 1)
+        self.assertIsNotNone(events[0].volume_envelope)
+        audio = synthesize_sequence(
+            events,
+            SynthConfig(waveform="sine", adsr=ADSR(0, 0, 1, 0)),
+        )
+        self.assertGreater(float(np.max(np.abs(audio[:500]))), 0.1)
+        self.assertLess(float(np.max(np.abs(audio[1000:2000]))), 0.01)
+
+    def test_macro_sequence_is_linearly_interpolated(self) -> None:
+        rendered = render_macro_sequence(MacroSequence((15.0, 0.0)), 736)
+        self.assertAlmostEqual(float(rendered[0]), 15.0)
+        self.assertAlmostEqual(float(rendered[367]), 15.0 * (1.0 - 367 / 735))
+        self.assertAlmostEqual(float(rendered[735]), 0.0)
+
+    def test_macro_sequence_can_render_stepped_values(self) -> None:
+        rendered = render_macro_sequence(
+            MacroSequence((0.0, 12.0)),
+            736,
+            interpolate=False,
+        )
+        self.assertEqual(float(rendered[0]), 0.0)
+        self.assertEqual(float(rendered[734]), 0.0)
+        self.assertEqual(float(rendered[735]), 12.0)
+
+    def test_pitch_envelope_is_attached_and_changes_audio(self) -> None:
+        events = parse_mml("@EP0 = { 0, 12 }\nEP0 O4 L1 T120 C")
+        plain = parse_mml("O4 L1 T120 C")
+        self.assertIsNotNone(events[0].pitch_envelope)
+        config = SynthConfig(waveform="sine", adsr=ADSR(0, 0, 1, 0))
+        modulated = synthesize_sequence(events, config)
+        unmodulated = synthesize_sequence(plain, config)
+        self.assertGreater(float(np.max(np.abs(modulated - unmodulated))), 0.1)
+
+    def test_note_envelope_is_attached_as_stepped_arpeggio(self) -> None:
+        events = parse_mml("@EN0 = { 0, 4, 7 }\nEN0 O4 L1 T120 C")
+        self.assertEqual(events[0].note_envelope.values, (0.0, 4.0, 7.0))
+
+    def test_pitch_lfo_macro_maps_to_event_lfo(self) -> None:
+        events = parse_mml("@MP0 = { 6, 5, 12 }\nMP0 O4 L4 T120 C")
+        self.assertAlmostEqual(events[0].lfo_delay, 0.1)
+        self.assertAlmostEqual(events[0].lfo_rate, 5.0)
+        self.assertAlmostEqual(events[0].lfo_depth, (12.0 / 15.0) * 0.08)
+        self.assertEqual(events[0].lfo_target, "pitch")
+
+    def test_undefined_pitch_macro_raises(self) -> None:
+        with self.assertRaisesRegex(ValueError, "未定義のピッチエンベロープ"):
+            parse_mml("EP9 O4 C")
+
+    def test_track_split_preserves_global_macro_definitions(self) -> None:
+        tracks = parse_mml_source("@v0 = { 15, 0 }\nA @v0 O4 C4\nB @v0 O4 E4")
+        self.assertEqual([track.channel for track in tracks], ["A", "B"])
+        for track in tracks:
+            self.assertIsNotNone(track.events[0].volume_envelope)
+
+    def test_pitch_macro_at_line_start_is_not_track_header(self) -> None:
+        tracks = parse_mml_source("@EP0 = { 0, 12 }\nO4 L4 C\nEP0 D")
+        self.assertEqual(len(tracks), 1)
+        self.assertEqual(tracks[0].channel, "")
+        self.assertIsNone(tracks[0].events[0].pitch_envelope)
+        self.assertIsNotNone(tracks[0].events[1].pitch_envelope)
 
 
 class AudioLintAnalysisTests(unittest.TestCase):

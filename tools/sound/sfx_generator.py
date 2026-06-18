@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# Version: 0.4.3 (正本: .rulesync/metadata/sfx-generator.json)
+# Version: 0.4.6 (正本: .rulesync/metadata/sfx-generator.json)
 """OnGen: NumPy/SciPy ベースのMML・ABC音源合成ツール。"""
 
 from __future__ import annotations
@@ -20,7 +20,7 @@ import numpy as np
 from scipy.io import wavfile
 from scipy.signal import butter, sosfilt
 
-__version__ = "0.4.3"
+__version__ = "0.4.6"
 
 SAMPLE_RATE = 44100
 BIT_DEPTH = 16
@@ -146,6 +146,21 @@ class SynthConfig:
     sample_root: Path | None = None
 
 
+@dataclass(frozen=True)
+class MacroSequence:
+    values: tuple[float, ...]
+    loop_index: int | None = None
+
+
+@dataclass
+class MMLMacroBank:
+    duty: dict[int, MacroSequence] = field(default_factory=dict)
+    volume: dict[int, MacroSequence] = field(default_factory=dict)
+    pitch: dict[int, MacroSequence] = field(default_factory=dict)
+    note: dict[int, MacroSequence] = field(default_factory=dict)
+    lfo: dict[int, MacroSequence] = field(default_factory=dict)
+
+
 @dataclass
 class NoteEvent:
     frequency: float | None
@@ -159,10 +174,14 @@ class NoteEvent:
     fm_ratio: float | None = None
     lfo_depth: float | None = None
     lfo_rate: float | None = None
+    lfo_delay: float | None = None
     lfo_target: str | None = None
     event_adsr: ADSR | None = None
     glide_cents: float | None = None
     glide_duration: float | None = None
+    volume_envelope: MacroSequence | None = None
+    pitch_envelope: MacroSequence | None = None
+    note_envelope: MacroSequence | None = None
 
 
 @dataclass
@@ -376,6 +395,7 @@ def synthesize_oscillator(
     )
     lfo_depth = event.lfo_depth if event.lfo_depth is not None else config.lfo.depth
     lfo_rate = event.lfo_rate if event.lfo_rate is not None else config.lfo.rate
+    lfo_delay = event.lfo_delay if event.lfo_delay is not None else 0.0
     lfo_target = event.lfo_target or config.lfo.target
     lfo_enabled = config.lfo.enabled or event.lfo_depth is not None
 
@@ -384,6 +404,13 @@ def synthesize_oscillator(
 
     t = np.arange(num_samples, dtype=np.float64) / SAMPLE_RATE
     carrier_freq = np.full(num_samples, frequency, dtype=np.float64)
+
+    def _event_lfo() -> np.ndarray:
+        lfo = generate_lfo_signal(num_samples, lfo_rate, config.lfo.waveform)
+        delay_samples = min(max(int(round(lfo_delay * SAMPLE_RATE)), 0), num_samples)
+        if delay_samples > 0:
+            lfo[:delay_samples] = 0.0
+        return lfo
 
     if event.glide_cents is not None and event.glide_duration is not None:
         glide_samples = min(max(int(event.glide_duration * SAMPLE_RATE), 1), num_samples)
@@ -396,8 +423,16 @@ def synthesize_oscillator(
         )
         carrier_freq *= 2.0 ** (glide_cents / 1200.0)
 
+    if event.pitch_envelope is not None:
+        pitch_steps = render_macro_sequence(event.pitch_envelope, num_samples)
+        carrier_freq *= 2.0 ** (pitch_steps / 12.0)
+
+    if event.note_envelope is not None:
+        note_steps = render_macro_sequence(event.note_envelope, num_samples, interpolate=False)
+        carrier_freq *= 2.0 ** (note_steps / 12.0)
+
     if lfo_enabled and lfo_depth > 0 and lfo_target == "pitch":
-        lfo = generate_lfo_signal(num_samples, lfo_rate, config.lfo.waveform)
+        lfo = _event_lfo()
         carrier_freq += frequency * lfo_depth * lfo
 
     if fm.enabled and fm.mod_index > 0:
@@ -411,7 +446,7 @@ def synthesize_oscillator(
     if waveform == "square":
         duty_values: float | np.ndarray = duty
         if lfo_enabled and lfo_depth > 0 and lfo_target == "duty":
-            lfo = generate_lfo_signal(num_samples, lfo_rate, config.lfo.waveform)
+            lfo = _event_lfo()
             duty_values = np.clip(duty + lfo_depth * lfo * 0.4, 0.05, 0.95)
 
         if config.anti_alias:
@@ -425,7 +460,7 @@ def synthesize_oscillator(
         wave = waveform_from_phase(waveform, phase, duty)
 
     if lfo_enabled and lfo_depth > 0:
-        lfo = generate_lfo_signal(num_samples, lfo_rate, config.lfo.waveform)
+        lfo = _event_lfo()
         if lfo_target == "volume":
             wave *= 1.0 - lfo_depth + lfo_depth * (0.5 + 0.5 * lfo)
 
@@ -496,6 +531,51 @@ def fit_audio_to_duration(audio: np.ndarray, num_samples: int) -> np.ndarray:
     return out
 
 
+def macro_value_at(sequence: MacroSequence, frame_index: int) -> float:
+    if not sequence.values:
+        return 0.0
+    if frame_index < len(sequence.values):
+        return sequence.values[frame_index]
+    if sequence.loop_index is not None:
+        loop_start = min(max(sequence.loop_index, 0), len(sequence.values) - 1)
+        loop_len = len(sequence.values) - loop_start
+        return sequence.values[loop_start + ((frame_index - loop_start) % loop_len)]
+    return sequence.values[-1]
+
+
+def render_macro_sequence(
+    sequence: MacroSequence,
+    num_samples: int,
+    frame_rate: int = 60,
+    *,
+    interpolate: bool = True,
+) -> np.ndarray:
+    if num_samples <= 0:
+        return np.zeros(0, dtype=np.float64)
+    samples_per_frame = max(int(round(SAMPLE_RATE / frame_rate)), 1)
+    positions = np.arange(num_samples, dtype=np.float64) / samples_per_frame
+    frame_indices = np.floor(positions).astype(np.int64)
+    current = np.asarray(
+        [macro_value_at(sequence, int(index)) for index in frame_indices],
+        dtype=np.float64,
+    )
+    if not interpolate:
+        return current
+    fractions = positions - frame_indices
+    next_values = np.asarray(
+        [macro_value_at(sequence, int(index) + 1) for index in frame_indices],
+        dtype=np.float64,
+    )
+    return current + (next_values - current) * fractions
+
+
+def apply_volume_envelope(audio: np.ndarray, sequence: MacroSequence | None) -> np.ndarray:
+    if sequence is None or audio.size == 0:
+        return audio
+    envelope = np.clip(render_macro_sequence(sequence, audio.size) / 15.0, 0.0, 1.0)
+    return audio * envelope
+
+
 def render_sample_note(event: NoteEvent, config: SynthConfig) -> np.ndarray:
     num_samples = int(round(max(event.duration, 0.0) * SAMPLE_RATE))
     if num_samples <= 0 or not event.sample_path:
@@ -510,7 +590,8 @@ def render_sample_note(event: NoteEvent, config: SynthConfig) -> np.ndarray:
 
     audio = fit_audio_to_duration(audio, num_samples)
     env = config.adsr.envelope(num_samples)
-    return audio * env * config.volume * event.volume
+    audio = audio * env * config.volume * event.volume
+    return apply_volume_envelope(audio, event.volume_envelope)
 
 
 def synthesize_note(event: NoteEvent, config: SynthConfig) -> np.ndarray:
@@ -534,7 +615,8 @@ def synthesize_note(event: NoteEvent, config: SynthConfig) -> np.ndarray:
     wave = apply_audio_filter(wave, config.filter_type, config.cutoff)
     wave = np.clip(wave, -1.0, 1.0)
     env = (event.event_adsr or config.adsr).envelope(num_samples)
-    return wave * env * volume
+    audio = wave * env * volume
+    return apply_volume_envelope(audio, event.volume_envelope)
 
 
 def synthesize_sequence(events: Sequence[NoteEvent], config: SynthConfig) -> np.ndarray:
@@ -932,6 +1014,10 @@ MML_TOKEN_RE = re.compile(
     (?P<tie>&) |
     (?P<gate_cut>@Q\d+) |
     (?P<gate>Q\d+(?:,[+-]?\d+)?) |
+    (?P<volume_env>@V\d+) |
+    (?P<pitch_env>EP\d+) |
+    (?P<note_env>EN\d+) |
+    (?P<mp_env>MP\d+) |
     (?P<transpose>K[+-]?\d+) |
     (?P<note_num>N\d+(?:,\d+)?) |
     (?P<fm_pct>%\d+) |
@@ -978,6 +1064,14 @@ PPMCK_CLEAR_TRACK_CONTENT_RE = re.compile(
     r"(?:[OTLVQK@%*\[~]|W\()",
     re.IGNORECASE,
 )
+MML_MACRO_DEF_RE = re.compile(
+    r"^@(?P<kind>V|EP|EN|MP)?(?P<index>\d+)\s*=\s*\{(?P<body>[^}]*)\}\s*$",
+    re.IGNORECASE,
+)
+MML_MACRO_DEF_SCAN_RE = re.compile(
+    r"@(?P<kind>V|EP|EN|MP)?(?P<index>\d+)\s*=\s*\{(?P<body>[^}]*)\}",
+    re.IGNORECASE,
+)
 
 
 @dataclass
@@ -999,12 +1093,18 @@ class MMLState:
     fm_index: float | None = None
     fm_ratio: float | None = None
     lfo_depth: float | None = None
+    lfo_rate: float | None = None
+    lfo_delay: float | None = None
+    lfo_target: str | None = None
     sample_path: str | None = None
     transpose: int = 0
     gate: int = 8
     gate_denom: int = 8
     gate_adjust_frames: int = 0
     gate_cut_frames: int = 0
+    volume_envelope: MacroSequence | None = None
+    pitch_envelope: MacroSequence | None = None
+    note_envelope: MacroSequence | None = None
 
 
 def mml_length_to_seconds(length: int, dotted: int, tempo: int) -> float:
@@ -1052,6 +1152,48 @@ def parse_mml_metadata(text: str) -> dict[str, str]:
     return metadata
 
 
+def parse_macro_sequence(body: str) -> MacroSequence:
+    values: list[float] = []
+    loop_index: int | None = None
+    tokens = [token for token in re.split(r"[\s,]+", body.strip()) if token]
+    for token in tokens:
+        if token == "|":
+            if loop_index is not None:
+                raise ValueError("MMLマクロ定義のループ記号 | は1回だけ指定できます")
+            loop_index = len(values)
+            continue
+        values.append(float(token))
+    if not values:
+        raise ValueError("MMLマクロ定義には1つ以上の値が必要です")
+    if loop_index is not None and loop_index >= len(values):
+        raise ValueError("MMLマクロ定義の | の後ろにはループ対象値が必要です")
+    return MacroSequence(tuple(values), loop_index)
+
+
+def parse_mml_macro_definitions(text: str) -> MMLMacroBank:
+    bank = MMLMacroBank()
+    uncommented = "\n".join(raw_line.split(";", 1)[0] for raw_line in text.splitlines())
+    for match in MML_MACRO_DEF_SCAN_RE.finditer(uncommented):
+        kind = (match.group("kind") or "DUTY").upper()
+        index = int(match.group("index"))
+        sequence = parse_macro_sequence(match.group("body"))
+        if kind == "DUTY":
+            bank.duty[index] = sequence
+        elif kind == "V":
+            bank.volume[index] = sequence
+        elif kind == "EP":
+            bank.pitch[index] = sequence
+        elif kind == "EN":
+            bank.note[index] = sequence
+        elif kind == "MP":
+            bank.lfo[index] = sequence
+    return bank
+
+
+def is_mml_macro_definition(line: str) -> bool:
+    return MML_MACRO_DEF_RE.match(line.strip()) is not None
+
+
 def mml_volume_to_gain(volume: int) -> float:
     return min(max(volume, 0), 15) / 15.0
 
@@ -1064,11 +1206,24 @@ def mml_scale_to_lfo_depth(value: int) -> float:
     return (min(max(value, 0), 15) / 15.0) * 0.08
 
 
+def apply_mml_pitch_lfo_macro(state: MMLState, sequence: MacroSequence, index: int) -> None:
+    if len(sequence.values) < 3:
+        raise ValueError(f"@MP{index} には delay, speed, depth の3値が必要です")
+    delay_frames, speed, depth = sequence.values[:3]
+    state.lfo_delay = max(delay_frames, 0.0) / 60.0
+    state.lfo_rate = max(speed, 0.0)
+    state.lfo_depth = mml_scale_to_lfo_depth(int(round(depth)))
+    state.lfo_target = "pitch"
+
+
 def preprocess_mml_text(text: str) -> str:
+    text = MML_MACRO_DEF_SCAN_RE.sub("", text)
     cleaned_lines: list[str] = []
     for raw_line in text.splitlines():
         line = raw_line.split(";", 1)[0].strip()
         if not line:
+            continue
+        if is_mml_macro_definition(line):
             continue
         if line.startswith("#"):
             if line.upper().startswith("#GATE-DENOM"):
@@ -1100,8 +1255,7 @@ def _read_track_header_at(line: str, pos: int) -> tuple[list[str], int] | None:
 
     end = pos + header_match.end()
     if end < len(line) and not line[end].isspace():
-        if len(header) == 1 and (line[end].isdigit() or line[end] in ".+-"):
-            return None
+        return None
 
     return list(header), end
 
@@ -1152,7 +1306,7 @@ def _split_line_track_chunks(line: str) -> list[tuple[list[str], str]]:
 def _has_clear_ppmck_track_headers(lines: list[str]) -> bool:
     channels: set[str] = set()
     for line in lines:
-        if line.upper().startswith("#GATE-DENOM"):
+        if line.upper().startswith("#GATE-DENOM") or is_mml_macro_definition(line):
             continue
         chunks = _split_line_track_chunks(line)
         for track_ids, content in chunks:
@@ -1179,6 +1333,9 @@ def split_ppmck_tracks(text: str) -> dict[str, str] | None:
         if line.upper().startswith("#GATE-DENOM"):
             global_directives.append(line)
             continue
+        if is_mml_macro_definition(line):
+            global_directives.append(line)
+            continue
 
         chunks = _split_line_track_chunks(line)
         if not chunks:
@@ -1202,9 +1359,10 @@ def split_ppmck_tracks(text: str) -> dict[str, str] | None:
     prefix = " ".join([*global_directives, *common_prefix])
     ordered = [track_id for track_id in PPMCK_CHANNEL_ORDER if track_id in track_parts]
     result: dict[str, str] = {}
+    prefix_joiner = "\n" if any(is_mml_macro_definition(line) for line in global_directives) else " "
     for track_id in ordered:
         body = " ".join(track_parts[track_id])
-        result[track_id] = f"{prefix} {body}".strip() if prefix else body
+        result[track_id] = f"{prefix}{prefix_joiner}{body}".strip() if prefix else body
     return result
 
 
@@ -1351,6 +1509,12 @@ def make_note_event(
         fm_index=state.fm_index,
         fm_ratio=state.fm_ratio,
         lfo_depth=state.lfo_depth,
+        lfo_rate=state.lfo_rate,
+        lfo_delay=state.lfo_delay,
+        lfo_target=state.lfo_target,
+        volume_envelope=state.volume_envelope,
+        pitch_envelope=state.pitch_envelope,
+        note_envelope=state.note_envelope,
     )
 
 
@@ -1363,6 +1527,7 @@ def parse_mml(
     default_config = default_config or SynthConfig()
     state = MMLState()
     apply_ppmck_channel_defaults(state, channel)
+    macro_bank = parse_mml_macro_definitions(text)
     events: list[NoteEvent] = []
     loop_stack: list[tuple[int, MMLState]] = []
 
@@ -1522,6 +1687,34 @@ def parse_mml(
                 )
             continue
 
+        if match.group("volume_env"):
+            index = int(match.group("volume_env")[2:])
+            if index not in macro_bank.volume:
+                raise ValueError(f"未定義の音量エンベロープです: @v{index}")
+            state.volume_envelope = macro_bank.volume[index]
+            continue
+
+        if match.group("pitch_env"):
+            index = int(match.group("pitch_env")[2:])
+            if index not in macro_bank.pitch:
+                raise ValueError(f"未定義のピッチエンベロープです: @EP{index}")
+            state.pitch_envelope = macro_bank.pitch[index]
+            continue
+
+        if match.group("note_env"):
+            index = int(match.group("note_env")[2:])
+            if index not in macro_bank.note:
+                raise ValueError(f"未定義のノートエンベロープです: @EN{index}")
+            state.note_envelope = macro_bank.note[index]
+            continue
+
+        if match.group("mp_env"):
+            index = int(match.group("mp_env")[2:])
+            if index not in macro_bank.lfo:
+                raise ValueError(f"未定義のピッチLFOマクロです: @MP{index}")
+            apply_mml_pitch_lfo_macro(state, macro_bank.lfo[index], index)
+            continue
+
         if match.group("transpose"):
             token = match.group("transpose")[1:]
             transpose = int(token)
@@ -1587,6 +1780,7 @@ def parse_mml(
 
         if match.group("lfo_cmd"):
             state.lfo_depth = mml_scale_to_lfo_depth(int(match.group("lfo_cmd")[1:]))
+            state.lfo_target = "pitch"
             continue
 
         if match.group("sample"):

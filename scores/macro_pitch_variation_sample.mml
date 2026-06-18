@@ -1,0 +1,21 @@
+#TITLE Macro pitch variation sample
+#METER 4/4
+; Longer verification sample for @v, @EP, @EN, and @MP macro behavior.
+
+@v0 = { 15, 11, 14, 8, 13, 7, 12, 6, | 10, 5, 8, 4 }
+@v1 = { 15, 13, 10, 7, 5, 4, 3 }
+@EP0 = { 0, 0, 2, 4, 7, 12, 7, 4, 2, 0 }
+@EP1 = { 0, -2, -5, -7, -5, -2, 0 }
+@EN0 = { 0, 4, 7, 12, | 7, 4 }
+@EN1 = { 0, 3, 7, 10, | 7, 3 }
+@MP0 = { 12, 5, 8 }
+@MP1 = { 0, 8, 5 }
+
+O4 L8 T120 V13
+@v0 C D E G C D E G
+EP0 L4 C D E G L2 C R8
+EP1 L4 G E D C L2 C R8
+EN0 L8 C C C C G G G G > C C C C < G G G G
+EN1 L8 A A A A F F F F E E E E D D D D
+MP0 L4 C E G > C < MP1 L8 G E D C R8
+@v1 L4 C D E G L1 C
