@@ -42,6 +42,7 @@ LOOP_EDGE_GAP_WARN = 0.25
 QUARTER_TICKS = 480
 STRUCTURE_DEFAULT_TEMPO = 120
 STRUCTURE_TICK_TOLERANCE = 2
+DENSITY_OUTLIER_RATIO = 4
 
 NOTE_NAMES = ("C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B")
 NOTE_ALIASES = {
@@ -879,6 +880,47 @@ def _seconds_to_ticks(seconds: float, tempo: int = STRUCTURE_DEFAULT_TEMPO) -> i
     return round(seconds * QUARTER_TICKS * tempo / 60)
 
 
+def _parse_canon_spec(value: str) -> tuple[list[str], int] | None:
+    """#CANON 値をパースし (トラック名リスト, delay_bars) を返す。パース失敗時は None。"""
+    parts = [p.strip() for p in value.split(",")]
+    track_names: list[str] = []
+    delay_bars: int | None = None
+    for part in parts:
+        low = part.lower()
+        if low.startswith("delay="):
+            m = re.fullmatch(r"(\d+)bar", low[6:].strip())
+            if m:
+                delay_bars = int(m.group(1))
+        elif part:
+            track_names.append(part.upper())
+    if len(track_names) >= 2 and delay_bars is not None:
+        return track_names, delay_bars
+    return None
+
+
+def _events_to_tick_notes(events: list[NoteEvent]) -> list[tuple[int, float]]:
+    """各イベントの開始 tick と周波数を返す（休符・None 周波数は除く）。"""
+    result: list[tuple[int, float]] = []
+    elapsed = 0.0
+    for event in events:
+        if event.frequency is not None:
+            result.append((_seconds_to_ticks(elapsed), event.frequency))
+        elapsed += event.duration
+    return result
+
+
+def _measure_note_counts(events: list[NoteEvent], ticks_per_measure: int) -> dict[int, int]:
+    """小節インデックス → 音符数（休符除く）のマッピングを返す。"""
+    counts: dict[int, int] = {}
+    elapsed = 0.0
+    for event in events:
+        if event.frequency is not None:
+            idx = _seconds_to_ticks(elapsed) // ticks_per_measure
+            counts[idx] = counts.get(idx, 0) + 1
+        elapsed += event.duration
+    return counts
+
+
 def lint_structure(tracks: list[ParsedMMLTrack]) -> StructureReport:
     if not tracks:
         return StructureReport(status="OK")
@@ -926,9 +968,10 @@ def lint_structure(tracks: list[ParsedMMLTrack]) -> StructureReport:
     ticks_per_measure = numerator * QUARTER_TICKS * 4 // denominator
     track_measures: dict[str, int] = {}
 
-    for label, total_ticks in track_tick_totals:
+    for track, (label, total_ticks) in zip(tracks, track_tick_totals):
         measure_count = round(total_ticks / ticks_per_measure) if ticks_per_measure > 0 else 0
         track_measures[label] = measure_count
+        track_label = label if label != "(メイン)" else None
 
         remainder = total_ticks % ticks_per_measure
         deviation = min(remainder, ticks_per_measure - remainder)
@@ -938,13 +981,12 @@ def lint_structure(tracks: list[ParsedMMLTrack]) -> StructureReport:
                 level="WARN",
                 code="measure_boundary_mismatch",
                 message=f"トラック {label} の終端が小節境界に合っていません。",
-                track=label if label != "(メイン)" else None,
+                track=track_label,
                 expected=nearest * ticks_per_measure,
                 actual=total_ticks,
             ))
 
         # ループ境界チェック（Phase 3）
-        track_label = label if label != "(メイン)" else None
         for seg in track.loop_segments:
             start_rem = seg.start_ticks % ticks_per_measure
             if min(start_rem, ticks_per_measure - start_rem) > STRUCTURE_TICK_TOLERANCE:
@@ -969,6 +1011,28 @@ def lint_structure(tracks: list[ParsedMMLTrack]) -> StructureReport:
                     actual=seg.segment_ticks,
                 ))
 
+        # 密度分析（Phase 5）
+        note_counts = _measure_note_counts(track.events, ticks_per_measure)
+        filled = sorted(c for c in note_counts.values() if c > 0)
+        if len(filled) >= 2:
+            median = filled[len(filled) // 2]
+            for m_idx, count in sorted(note_counts.items()):
+                if count == 0:
+                    continue
+                if count > median * DENSITY_OUTLIER_RATIO or count * DENSITY_OUTLIER_RATIO < median:
+                    issues.append(StructureIssue(
+                        level="WARN",
+                        code="measure_density_outlier",
+                        message=(
+                            f"トラック {label} の第 {m_idx + 1} 小節の音数（{count}）が"
+                            f"中央値（{median}）と大きく異なります。"
+                        ),
+                        track=track_label,
+                        measure=m_idx + 1,
+                        expected=median,
+                        actual=count,
+                    ))
+
     if len(track_tick_totals) > 1:
         measure_counts = list(track_measures.values())
         if len(set(measure_counts)) > 1:
@@ -982,6 +1046,42 @@ def lint_structure(tracks: list[ParsedMMLTrack]) -> StructureReport:
                 expected=min_m * ticks_per_measure,
                 actual=max_m * ticks_per_measure,
             ))
+
+    # 輪唱検査（Phase 4）: #CANON A,B,delay=Nbar
+    canon_spec = metadata.get("canon")
+    if canon_spec:
+        parsed_canon = _parse_canon_spec(canon_spec)
+        if parsed_canon is not None:
+            canon_names, delay_bars = parsed_canon
+            delay_ticks = delay_bars * ticks_per_measure
+            track_map = {t.channel.upper(): t for t in tracks}
+            name_a, name_b = canon_names[0], canon_names[1]
+            if name_a in track_map and name_b in track_map:
+                notes_a = {
+                    tick: freq
+                    for tick, freq in _events_to_tick_notes(track_map[name_a].events)
+                }
+                notes_b = {
+                    tick: freq
+                    for tick, freq in _events_to_tick_notes(track_map[name_b].events)
+                }
+                mismatch_count = sum(
+                    1
+                    for tick_a, freq_a in notes_a.items()
+                    if (freq_b := notes_b.get(tick_a + delay_ticks)) is not None
+                    and not math.isclose(freq_a, freq_b, rel_tol=1e-6)
+                )
+                if mismatch_count > 0:
+                    issues.append(StructureIssue(
+                        level="WARN",
+                        code="canon_delay_mismatch",
+                        message=(
+                            f"#CANON {name_a},{name_b}（delay={delay_bars}bar）の"
+                            f"音高が {mismatch_count} 箇所一致しません。"
+                        ),
+                        expected=0,
+                        actual=mismatch_count,
+                    ))
 
     overall_measures = max(track_measures.values()) if track_measures else None
 
@@ -1359,6 +1459,8 @@ def parse_mml_metadata(text: str) -> dict[str, str]:
             metadata["meter"] = value.replace(" ", "")
         elif key == "TITLE" and value:
             metadata["title"] = value
+        elif key == "CANON" and value:
+            metadata["canon"] = value
     return metadata
 
 

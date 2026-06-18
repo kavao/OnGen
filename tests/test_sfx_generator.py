@@ -71,6 +71,9 @@ synthesize_sequence = sg.synthesize_sequence
 lint_structure = sg.lint_structure
 StructureReport = sg.StructureReport
 StructureIssue = sg.StructureIssue
+_parse_canon_spec = sg._parse_canon_spec
+_events_to_tick_notes = sg._events_to_tick_notes
+_measure_note_counts = sg._measure_note_counts
 __version__ = sg.__version__
 
 
@@ -1471,6 +1474,142 @@ class StructureLintTests(unittest.TestCase):
         mml = "#METER 4/4\nO4 L4 T120 C D E F\n"
         tracks = parse_mml_source(mml)
         self.assertEqual(len(tracks[0].loop_segments), 0)
+        report = lint_structure(tracks)
+        codes = {i.code for i in report.issues}
+        self.assertNotIn("loop_boundary_mismatch", codes)
+
+    def test_structure_lint_phase4_parse_canon_spec(self) -> None:
+        # _parse_canon_spec の基本動作確認
+        result = _parse_canon_spec("A,B,delay=1bar")
+        self.assertIsNotNone(result)
+        names, bars = result
+        self.assertEqual(names, ["A", "B"])
+        self.assertEqual(bars, 1)
+
+        self.assertIsNone(_parse_canon_spec("A,delay=1bar"))     # トラックが1つ
+        self.assertIsNone(_parse_canon_spec("A,B"))              # delay なし
+        self.assertIsNone(_parse_canon_spec("A,B,delay=xbar"))   # 数値でない
+
+    def test_structure_lint_phase4_events_to_tick_notes(self) -> None:
+        # _events_to_tick_notes: 休符除外・累積 tick の確認
+        mml = "O4 L4 T120 C4 R4 D4"
+        tracks = parse_mml_source(mml)
+        tick_notes = _events_to_tick_notes(tracks[0].events)
+        # C4 at 0, rest at 480 (skipped), D4 at 960
+        self.assertEqual(len(tick_notes), 2)
+        self.assertEqual(tick_notes[0][0], 0)    # C4 at tick 0
+        self.assertEqual(tick_notes[1][0], 960)  # D4 at tick 960
+
+    def test_structure_lint_phase4_matching_canon_no_issue(self) -> None:
+        # A と B が 1 小節ずれで同じ音高列 → canon_delay_mismatch なし
+        mml = (
+            "#METER 4/4\n"
+            "#CANON A,B,delay=1bar\n"
+            "A O4 L4 T120 C4 D4 E4 F4 C4 D4 E4 F4\n"
+            "B O4 L4 T120 R1 C4 D4 E4 F4 C4 D4 E4 F4\n"
+        )
+        tracks = parse_mml_source(mml)
+        report = lint_structure(tracks)
+        codes = {i.code for i in report.issues}
+        self.assertNotIn("canon_delay_mismatch", codes)
+
+    def test_structure_lint_phase4_pitch_mismatch_reports_issue(self) -> None:
+        # B の音高が A と異なる → canon_delay_mismatch
+        mml = (
+            "#METER 4/4\n"
+            "#CANON A,B,delay=1bar\n"
+            "A O4 L4 T120 C4 D4 E4 F4 C4 D4 E4 F4\n"
+            "B O4 L4 T120 R1 G4 A4 B4 >C4 G4 A4 B4 >C4\n"
+        )
+        tracks = parse_mml_source(mml)
+        report = lint_structure(tracks)
+        codes = {i.code for i in report.issues}
+        self.assertIn("canon_delay_mismatch", codes)
+        issue = next(i for i in report.issues if i.code == "canon_delay_mismatch")
+        self.assertEqual(issue.expected, 0)
+        self.assertEqual(issue.actual, 8)  # 全 8 音が不一致
+
+    def test_structure_lint_phase4_wrong_delay_reports_issue(self) -> None:
+        # 実際は 1bar ずれなのに delay=2bar と宣言 → canon_delay_mismatch
+        mml = (
+            "#METER 4/4\n"
+            "#CANON A,B,delay=2bar\n"
+            "A O4 L4 T120 C4 D4 E4 F4 G4 A4 B4 >C4 C4 D4 E4 F4\n"
+            "B O4 L4 T120 R1 C4 D4 E4 F4 G4 A4 B4 >C4 C4 D4 E4 F4\n"
+        )
+        tracks = parse_mml_source(mml)
+        report = lint_structure(tracks)
+        codes = {i.code for i in report.issues}
+        self.assertIn("canon_delay_mismatch", codes)
+
+    def test_structure_lint_phase5_measure_note_counts(self) -> None:
+        # _measure_note_counts の基本動作: 各小節の音符数を正しく返す
+        # 4/4, T120 → ticks_per_measure=1920; 2 half notes per measure
+        mml = "#METER 4/4\nO4 T120 C2 D2 E2 F2\n"
+        tracks = parse_mml_source(mml)
+        counts = _measure_note_counts(tracks[0].events, 1920)
+        self.assertEqual(counts.get(0), 2)  # measure 0: C2 D2
+        self.assertEqual(counts.get(1), 2)  # measure 1: E2 F2
+
+    def test_structure_lint_phase5_uniform_density_no_issue(self) -> None:
+        # 各小節が同じ密度 → measure_density_outlier なし
+        mml = "#METER 4/4\nO4 T120 C4 D4 E4 F4 C4 D4 E4 F4 C4 D4 E4 F4 C4 D4 E4 F4\n"
+        report = lint_structure(parse_mml_source(mml))
+        codes = {i.code for i in report.issues}
+        self.assertNotIn("measure_density_outlier", codes)
+
+    def test_structure_lint_phase5_dense_measure_outlier(self) -> None:
+        # 3小節が2音、1小節が16音 → 第4小節が外れ値
+        mml = (
+            "#METER 4/4\n"
+            "O4 T120 "
+            "C2 D2 C2 D2 C2 D2 "
+            "C16 D16 E16 F16 G16 A16 B16 >C16 <B16 A16 G16 F16 E16 D16 C16 D16\n"
+        )
+        report = lint_structure(parse_mml_source(mml))
+        codes = {i.code for i in report.issues}
+        self.assertIn("measure_density_outlier", codes)
+        issue = next(i for i in report.issues if i.code == "measure_density_outlier")
+        self.assertEqual(issue.measure, 4)
+        self.assertEqual(issue.actual, 16)
+        self.assertEqual(issue.expected, 2)  # 中央値
+
+    def test_structure_lint_phase5_sparse_measure_outlier(self) -> None:
+        # 3小節が8音、1小節が1音 → 第4小節が外れ値
+        mml = (
+            "#METER 4/4\n"
+            "O4 T120 "
+            "C8 D8 E8 F8 G8 A8 B8 >C8 "
+            "<C8 D8 E8 F8 G8 A8 B8 >C8 "
+            "<C8 D8 E8 F8 G8 A8 B8 >C8 "
+            "C1\n"
+        )
+        report = lint_structure(parse_mml_source(mml))
+        codes = {i.code for i in report.issues}
+        self.assertIn("measure_density_outlier", codes)
+        issue = next(i for i in report.issues if i.code == "measure_density_outlier")
+        self.assertEqual(issue.measure, 4)
+        self.assertEqual(issue.actual, 1)
+        self.assertEqual(issue.expected, 8)
+
+    def test_structure_lint_phase5_rest_measure_not_outlier(self) -> None:
+        # 休符小節（count=0）は外れ値とみなさない
+        mml = "#METER 4/4\nO4 T120 R1 C4 D4 E4 F4 C4 D4 E4 F4 C4 D4 E4 F4\n"
+        report = lint_structure(parse_mml_source(mml))
+        codes = {i.code for i in report.issues}
+        self.assertNotIn("measure_density_outlier", codes)
+
+    def test_structure_lint_phase3_bug_multitrack_loop_per_track(self) -> None:
+        # Phase 3 バグ修正確認: zip 化後、各トラックのループが正しく検査される
+        # Track A: 1小節ループ（境界OK）、Track B: 1小節ループ（境界OK）
+        mml = (
+            "#METER 4/4\n"
+            "A O4 L4 T120 [C4 D4 E4 F4]2\n"
+            "B O4 L4 T120 [G4 A4 B4 >C4]2\n"
+        )
+        tracks = parse_mml_source(mml)
+        self.assertEqual(len(tracks[0].loop_segments), 1)
+        self.assertEqual(len(tracks[1].loop_segments), 1)
         report = lint_structure(tracks)
         codes = {i.code for i in report.issues}
         self.assertNotIn("loop_boundary_mismatch", codes)
