@@ -1,0 +1,58 @@
+#TITLE Chiptune Boss Sample
+#METER 4/4
+; D Minor (harmonic) | T170 | 4/4 | 16 bars (A8 + B8) | loop
+; Character: Overwhelming, dark, threatening
+; Scale: D E F G A B- C+ (harmonic minor: raised 7th = C#)
+
+A @1 V13 O4 L4 T170
+; --- A section (bars 1-8) ---
+D8 D8 D8 E8 F4 D4
+A4 C+4 D4 A4
+F8 G8 A4 B-4 A4
+D2. R4
+A8 A8 B-8 A8 G4 F4
+C+8 D8 E4 F4 G4
+B-8 A8 G4 F4 E4
+A1
+; --- B section (bars 9-16): higher, more intense ---
+> D4 F4 A4 D4 <
+> C+4 D4 E4 F4 <
+> G8 F8 E4 D4 C+4 <
+> D1 <
+> A8 B-8 A8 G8 F4 E4 <
+> D4 F4 A4 O6 D4 O4 <
+> F8 E8 D8 C+8 D4 < A4
+D1
+
+; 注意: B トラック内の音符は明示的な音長を付ける
+B @2 V10 O3 L2 T170
+; Dm / F / A (V) power intervals — half-note pairs
+D2 A2   F2 C2   D2 A2   D2 A2
+D2 A2   F2 C2   A2 C+2  A2 E2
+D2 A2   F2 C2   A2 C+2  D2 A2
+F2 C2   A2 C+2  A2 E2   D2 D2
+
+C V11 O2 L8 T170
+; Driving bass with harmonic minor tension
+D8 D8 D8 D8 D8 D8 D8 D8
+A8 A8 A8 A8 A8 C+8 D8 D8
+F8 F8 F8 F8 F8 F8 F8 F8
+A8 A8 A8 A8 A8 A8 A8 A8
+D8 D8 D8 D8 D8 D8 D8 D8
+A8 A8 A8 A8 A8 C+8 D8 D8
+G8 G8 G8 G8 G8 G8 G8 G8
+A8 A8 A8 A8 A8 A8 A8 A8
+D8 D8 D8 D8 D8 D8 D8 D8
+F8 F8 F8 F8 A8 A8 A8 A8
+A8 A8 C+8 C+8 D8 D8 A8 A8
+D8 D8 D8 D8 D8 D8 D8 D8
+F8 F8 F8 F8 F8 F8 F8 F8
+A8 A8 A8 A8 C+8 C+8 A8 A8
+A8 A8 G8 G8 F8 F8 E8 E8
+D8 D8 D8 D8 R4 R4
+
+D V10 L4 Q4 T170
+[C8 R8 C8 R8 C4 R4]16
+
+E V6 L16 Q2 T170
+[C16 C16 C16 C16 C16 C16 C16 C16 C16 C16 C16 C16 C16 C16 C16 C16]16

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# Version: 0.4.6 (正本: .rulesync/metadata/sfx-generator.json)
+# Version: 0.4.7 (正本: .rulesync/metadata/sfx-generator.json)
 """OnGen: NumPy/SciPy ベースのMML・ABC音源合成ツール。"""
 
 from __future__ import annotations
@@ -20,7 +20,7 @@ import numpy as np
 from scipy.io import wavfile
 from scipy.signal import butter, sosfilt
 
-__version__ = "0.4.6"
+__version__ = "0.4.7"
 
 SAMPLE_RATE = 44100
 BIT_DEPTH = 16
@@ -2078,8 +2078,8 @@ def parse_mml(
             start_idx, saved_state = loop_stack.pop()
             segment = events[start_idx:]
             if _loop_segments is not None:
-                pre_ticks = _seconds_to_ticks(sum(e.duration for e in events[:start_idx]))
-                seg_ticks = _seconds_to_ticks(sum(e.duration for e in segment))
+                pre_ticks = _seconds_to_ticks(sum(e.duration for e in events[:start_idx]), state.tempo)
+                seg_ticks = _seconds_to_ticks(sum(e.duration for e in segment), state.tempo)
                 _loop_segments.append(LoopSegmentInfo(
                     start_ticks=pre_ticks,
                     segment_ticks=seg_ticks,
@@ -3558,11 +3558,54 @@ def create_parser() -> argparse.ArgumentParser:
     parser.add_argument("--fail-on-warn", action="store_true", help="WARN以上の検査結果があれば終了コードを1にする")
     parser.add_argument("--fail-on-error", action="store_true", help="ERROR以上の検査結果があれば終了コードを1にする")
     parser.add_argument(
+        "--preview-bars",
+        type=int,
+        default=None,
+        metavar="N",
+        help="先頭 N 小節だけ生成する（作曲途中の素早い確認用）。#METER と T コマンドがあると拍子・テンポを自動判定する。",
+    )
+    parser.add_argument(
         "--play",
         action="store_true",
         help="生成した音声をその場で再生（ffplay が必要。ffmpegに同梱）",
     )
     return parser
+
+
+def _truncate_to_preview_bars(
+    track_specs: list[tuple[list[NoteEvent], SynthConfig]],
+    n_bars: int,
+    input_text: str,
+) -> list[tuple[list[NoteEvent], SynthConfig]]:
+    """先頭 N 小節分のイベントに絞り込む（--preview-bars 用）。"""
+    meter_match = re.search(r"#(?:METER|TIME)\s+(\d+)/(\d+)", input_text, re.IGNORECASE)
+    if meter_match:
+        try:
+            numerator, denominator = parse_mml_meter(
+                f"{meter_match.group(1)}/{meter_match.group(2)}"
+            )
+        except ValueError:
+            numerator, denominator = 4, 4
+    else:
+        numerator, denominator = 4, 4
+
+    tempo_match = re.search(r"\bT(\d{2,3})\b", input_text)
+    tempo = int(tempo_match.group(1)) if tempo_match else 120
+
+    bar_duration = numerator * 60.0 * 4 / (denominator * max(tempo, 1))
+    preview_duration = n_bars * bar_duration
+
+    result: list[tuple[list[NoteEvent], SynthConfig]] = []
+    for events, cfg in track_specs:
+        truncated: list[NoteEvent] = []
+        elapsed = 0.0
+        for event in events:
+            if elapsed >= preview_duration:
+                break
+            truncated.append(event)
+            elapsed += event.duration
+        result.append((truncated, cfg))
+    return result
 
 
 def main(argv: Sequence[str] | None = None) -> int:
@@ -3589,6 +3632,9 @@ def main(argv: Sequence[str] | None = None) -> int:
                 print(f"Pyxel互換警告: {issue}", file=sys.stderr)
 
         track_specs = resolve_track_specs(args, config)
+        if getattr(args, "preview_bars", None):
+            track_specs = _truncate_to_preview_bars(track_specs, args.preview_bars, input_text)
+            print(f"[preview] 先頭 {args.preview_bars} 小節のみ生成します。", file=sys.stderr)
         track_audios = [
             synthesize_sequence(track_events, track_config)
             for track_events, track_config in track_specs

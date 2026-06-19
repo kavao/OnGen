@@ -1,0 +1,58 @@
+#TITLE Chiptune Field Sample
+#METER 4/4
+; G Major | T108 | 4/4 | 16 bars (A8 + B8) | loop
+; Character: Adventurous, open, bouncy
+; Scale: G A B C D E F+
+
+A @1 V13 O4 L4 T108
+; --- A section (bars 1-8) ---
+G4 B4 > D4 B4 <
+A4 B4 > C4 D4 <
+> D4 E4 D4 < B4
+D2. R4
+> C4 B4 A4 G4 <
+G4 A4 B4 > C4 <
+> D8 C8 B4 A4 < G4
+G2. R4
+; --- B section (bars 9-16) ---
+> G4 A4 B4 D4 <
+> E4 D4 C4 B4 <
+> D8 E8 F+8 G8 A4 < G4
+> G1 <
+> D4 C4 B4 A4 <
+G4 A4 B4 > C4 <
+> D8 C8 B4 A4 < G4
+G1
+
+; 注意: B トラック内の音符は明示的な音長を付ける（C/D/A/E を行頭に裸で書かない）
+B @2 V10 O3 L2 T108
+; root+fifth half-note pairs — G Major chords
+G2 D2   G2 D2   B2 F+2  D2 A2
+E2 B2   A2 E2   D2 A2   G2 D2
+G2 D2   E2 B2   B2 F+2  G2 D2
+D2 A2   E2 B2   D2 A2   G2 G2
+
+C V11 O2 L4 T108
+; Bass: root-fifth walking
+G4 D4 G4 D4
+G4 D4 G4 D4
+B4 F+4 B4 F+4
+D4 A4 D4 A4
+E4 B4 E4 B4
+A4 E4 A4 E4
+D4 A4 D4 A4
+G4 D4 G4 D4
+G4 D4 G4 D4
+E4 B4 E4 B4
+B4 F+4 B4 F+4
+G4 D4 G4 D4
+D4 A4 D4 A4
+E4 B4 E4 B4
+D4 A4 D4 A4
+G4 D4 G2
+
+D V9 L4 Q4 T108
+[C4 R4 C4 R4]16
+
+E V6 L8 Q1 T108
+[C8 C8 C8 C8 C8 C8 C8 C8]16

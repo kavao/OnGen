@@ -1,0 +1,40 @@
+#TITLE Chiptune Action Sample
+#METER 4/4
+; A Minor | T160 | 4/4 | 8 bars | loop
+; Character: Intense, driving, aggressive
+; Scale: A B C D E F G (natural minor)
+
+A @1 V13 O4 L4 T160
+; --- Phrase 1 (bars 1-4) ---
+A8 A8 C4 E4 C4
+A4 B4 C4 D4
+E8 D8 C4 B4 A4
+E2 R2
+; --- Phrase 2 (bars 5-8) ---
+C8 C8 E4 G4 E4
+A4 G4 F4 E4
+G8 F8 E4 D4 C4
+A2 R2
+
+; 注意: B トラック内の音符は明示的な音長を付ける
+B @2 V10 O3 L2 T160
+; Power intervals: root + fifth (half-note pairs)
+A2 E2   A2 E2   C2 G2   E2 B2
+C2 G2   A2 E2   C2 G2   A2 E2
+
+C V11 O2 L8 T160
+; Driving eighth-note bass
+A8 A8 A8 A8 A8 A8 A8 A8
+A8 A8 A8 A8 G8 G8 A8 A8
+E8 E8 E8 E8 D8 D8 E8 E8
+E8 E8 E8 E8 E8 E8 E8 E8
+C8 C8 C8 C8 E8 E8 G8 G8
+A8 A8 G8 G8 F8 F8 E8 E8
+G8 G8 F8 F8 E8 E8 D8 D8
+A8 A8 A8 A8 R4 R4
+
+D V10 L4 Q4 T160
+[C4 R8 C8 C4 R4]8
+
+E V6 L8 Q1 T160
+[C8 C8 C8 C8 C8 C8 C8 C8]8

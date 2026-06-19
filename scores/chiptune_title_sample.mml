@@ -1,0 +1,61 @@
+#TITLE Chiptune Title Sample
+#METER 4/4
+; C Major | T96 | 4/4 | 16 bars (A8 + B8) | loop
+; Character: Hopeful, triumphant, memorable
+; Scale: C D E F G A B
+
+A @1 V13 O4 L4 T96
+; --- A section (bars 1-8) ---
+C8 E8 G2 E4
+D8 F8 A2 F4
+G4 B4 > C2 <
+C1
+E4 G4 A4 G4
+F4 A4 > C4 A4 <
+G8 F8 E4 D4 C4
+C2. R4
+; --- B section (bars 9-16) ---
+> E8 G8 C2 G4 <
+> D8 F8 A2 F4 <
+> C8 E8 G4 A4 G4 <
+> C1 <
+> G4 F4 E4 D4 <
+C4 E4 G4 B4
+> C8 < B8 A4 G4 E4
+C1
+
+; 注意: B トラック内で C/D/A/E を行頭に書くとトラックラベルと誤解析される。
+;       明示的な音長（C2 G2 など）を使って区別する。
+B @2 V10 O3 L2 T96
+; I V vi IV progression — root+fifth half-note pairs
+C2 G2   D2 A2   G2 D2   A2 E2
+C2 G2   F2 C2   G2 D2   G2 D2
+E2 B2   D2 A2   G2 D2   C2 G2
+G2 D2   E2 B2   C2 G2   C2 G2
+
+C V11 O2 L4 T96
+; Bass: root-fifth alternation
+C4 G4 C4 G4
+D4 A4 D4 A4
+G4 D4 G4 D4
+A4 E4 A4 E4
+C4 G4 C4 G4
+F4 C4 F4 C4
+G4 D4 G4 D4
+G4 D4 G4 D4
+E4 B4 E4 B4
+D4 A4 D4 A4
+G4 D4 G4 D4
+C4 G4 C4 G4
+G4 D4 G4 D4
+E4 B4 E4 B4
+C4 G4 C4 G4
+C4 G4 C2
+
+D V9 L4 Q4 T96
+; Kick on beats 1 and 3
+[C4 R4 C4 R4]16
+
+E V6 L8 Q1 T96
+; Hi-hat (bar-aligned: 8 eighth notes per bar × 16 bars)
+[C8 C8 C8 C8 C8 C8 C8 C8]16

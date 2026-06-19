@@ -325,6 +325,36 @@ class AudioLintAnalysisTests(unittest.TestCase):
             self.assertEqual(exit_code, 1)
 
 
+class PreviewBarsTests(unittest.TestCase):
+    def test_preview_bars_shortens_output(self) -> None:
+        """--preview-bars で先頭 N 小節のみに音源が短くなることを確認する。"""
+        mml_4bars = "#METER 4/4\nA @1 V13 O4 L4 T120\nC4 D4 E4 F4\nG4 A4 B4 > C4 <\n" \
+                    "C4 D4 E4 F4\nG4 A4 B4 > C4 <\n"
+        with tempfile.TemporaryDirectory() as tmpdir:
+            full_out = str(Path(tmpdir) / "full")
+            preview_out = str(Path(tmpdir) / "preview")
+            main(["--input", mml_4bars, "-o", full_out])
+            main(["--input", mml_4bars, "--preview-bars", "2", "-o", preview_out])
+            full_wav = Path(full_out + ".wav")
+            preview_wav = Path(preview_out + ".wav")
+            self.assertTrue(full_wav.exists())
+            self.assertTrue(preview_wav.exists())
+            self.assertLess(preview_wav.stat().st_size, full_wav.stat().st_size)
+
+    def test_preview_bars_uses_meter(self) -> None:
+        """3/4 拍子で --preview-bars 2 が 2 小節分に収まることを確認する。"""
+        mml_3_4 = "#METER 3/4\nA @1 V13 O4 L4 T120\n" + ("C4 D4 E4\n" * 4)
+        with tempfile.TemporaryDirectory() as tmpdir:
+            full_out = str(Path(tmpdir) / "full")
+            prev_out = str(Path(tmpdir) / "prev")
+            main(["--input", mml_3_4, "-o", full_out])
+            main(["--input", mml_3_4, "--preview-bars", "2", "-o", prev_out])
+            full_size = Path(full_out + ".wav").stat().st_size
+            prev_size = Path(prev_out + ".wav").stat().st_size
+            # 2/4 小節分なので half 以下になる
+            self.assertLessEqual(prev_size, full_size // 2 + 1000)
+
+
 class TrackStyleTests(unittest.TestCase):
     def test_track_style_parses_in_declared_order(self) -> None:
         parser = create_parser()

@@ -72,6 +72,53 @@ OnGenの音源生成ツールを使い、ゲームやアプリ向けの効果音
 2. 検証出力は本番アセットと分離する。
 3. 生成後は `--lint --analyze` で楽譜イベントと波形を確認する。
 
+## Chiptune composition guide
+
+BGM を作曲するときは、まずジャンルを確定させ、対応するスケールとテンポを選んでから音符を書く。
+詳細な設計根拠は `_workingspace/plans/chiptune-composition-skill-design.md`。
+
+### ジャンル → スケール → テンポ
+
+| ジャンル | 優先スケール | テンポ(BPM) | 基本拍子 | ループ |
+|---------|------------|------------|---------|-------|
+| `title` | メジャー(C,F,G) | 80–110 | 4/4 | あり |
+| `field` | メジャー(C,G)、ドリアン(D,A) | 90–120 | 4/4 | あり |
+| `action` | 自然短音階(A,D) | 140–180 | 4/4 | あり |
+| `boss` | 和声短音階(D,A) | 150–200 | 4/4, 5/4 | あり |
+| `dungeon` | 自然短音階(A,E)、フリジアン | 60–90 | 4/4, 3/4 | あり |
+| `victory` | メジャー(C,G) | 120–160 | 4/4 | なし（ワンショット） |
+| `gameover` | 自然短音階(A,D) | 60–80 | 4/4 | なし（ワンショット） |
+| `town` | メジャー(C,F)、ドリアン(G) | 80–110 | 4/4, 3/4 | あり |
+
+### キー選択の補足
+
+- C / A / D / G キーが OnGen の O2〜O5 範囲に収まりやすい。メロディが O4 付近になるキーを優先する。
+- `boss` / `dungeon` で和声短音階を使うと、VII 度の半音上昇（例: D 短調での C+）が V→i 解決を強調する。
+- `gameover` は下降進行が最重要。スケール選択より「最後の音が主音より低く終わる輪郭」を優先する。
+
+### トラック割り当て（PPMCK 標準）
+
+| トラック | 音色 | 推奨用途 |
+|---------|-----|---------|
+| A | Square | メインメロディ |
+| B | Square | ハーモニー / 対旋律 |
+| C | Triangle | ベースライン |
+| D | Noise | キック / 主打楽器 |
+| E | Noise | ハイハット / 副打楽器（省略可） |
+
+### サンプルスコア
+
+| ファイル | ジャンル | キー | テンポ | 拍子 |
+|---------|---------|------|--------|------|
+| `scores/chiptune_title_sample.mml` | title | C Major | T96 | 4/4 |
+| `scores/chiptune_field_sample.mml` | field | G Major | T108 | 4/4 |
+| `scores/chiptune_action_sample.mml` | action | A Minor | T160 | 4/4 |
+| `scores/chiptune_boss_sample.mml` | boss | D Min (harmonic) | T170 | 4/4 |
+| `scores/chiptune_dungeon_sample.mml` | dungeon | A Minor + chromatic | T72 | 4/4 |
+| `scores/chiptune_victory_sample.mml` | victory | C Major | T144 | 4/4 |
+| `scores/chiptune_gameover_sample.mml` | gameover | A Minor | T72 | 4/4 |
+| `scores/chiptune_town_sample.mml` | town | F Major | T90 | 3/4 |
+
 ## Common commands
 
 標準パスは `python tools/sound/sfx_generator.py` とする。

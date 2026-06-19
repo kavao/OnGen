@@ -1,0 +1,35 @@
+#TITLE Chiptune Victory Sample
+#METER 4/4
+; C Major | T144 | 4/4 | 6 bars | one-shot (no loop)
+; Character: Triumphant, celebratory, fanfare
+
+A @1 V13 O4 L4 T144
+; Bar 1: Classic fanfare pickup
+G8 G8 G8 G8 E4 G4
+; Bar 2: Rising energy
+A4 G4 A4 G4
+; Bar 3: Climax in upper register
+> C4 E4 G4 E4 <
+; Bar 4: Sustain triumph
+> C2. R4 <
+; Bar 5: Descending flourish
+G4 A4 B4 > C4 <
+; Bar 6: Final tonic
+> C1 <
+
+; 注意: B トラック内の音符は明示的な音長を付ける
+B @2 V11 O3 L2 T144
+; Block chords — half-note pairs
+G2 D2   E2 C2   C2 G2   C1
+G2 D2   C2 G2
+
+C V12 O2 L4 T144
+G4 G4 G4 G4
+A4 E4 A4 E4
+C4 G4 C4 G4
+C4 C4 C4 C4
+G4 D4 G4 D4
+C4 G4 C2
+
+D V9 L4 Q4 T144
+[C4 R4 C4 R4]6

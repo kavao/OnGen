@@ -1,0 +1,57 @@
+#TITLE Chiptune Dungeon Sample
+#METER 4/4
+; A Minor + chromatic | T72 | 4/4 | 8 bars | loop
+; Character: Eerie, tense, ominous
+; Base: A natural minor (A B C D E F G)
+; + Phrygian color (B- = Bb), chromatic passing tones
+
+A @1 V12 O4 L4 T72
+; Bar 1: Phrygian opening (half-step above root = Bb)
+A4 B-4 A4 G4
+; Bar 2: Descend through A minor
+F4 E4 D4 C4
+; Bar 3: Chromatic ascent for unease
+A4 B4 C4 D4
+; Bar 4: Suspend on dominant
+E2. R4
+; Bar 5: Chromatic descent G#->G->F#->F
+G+4 G4 F+4 F4
+; Bar 6: Continue descent E->D#->D->C#
+E4 D+4 D4 C+4
+; Bar 7: Return of Phrygian motif
+A4 B-4 A4 G4
+; Bar 8: Unresolved end
+A2 E2
+
+B @2 V9 O3 L1 T72
+; Sparse sustained harmony (whole-note drones)
+A1
+F1
+A1
+E1
+G1
+D1
+A1
+A1
+
+C V11 O2 L2 T72
+; Slow bass with fifth intervals
+A2 E2
+F2 C2
+A2 E2
+E2 B2
+G2 D2
+D2 A2
+A2 E2
+A2 R2
+
+D V8 L4 Q4 T72
+; Very sparse percussion — hit on beat 3 of odd bars only
+R2 C4 R4
+R1
+R2 C4 R4
+R1
+R2 C4 R4
+R1
+R2 C4 R4
+C4 R4 R4 R4

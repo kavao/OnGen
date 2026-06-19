@@ -1,0 +1,69 @@
+#TITLE Chiptune Town Sample
+#METER 3/4
+; F Major | T90 | 3/4 (waltz) | 16 bars (A8 + B8) | loop
+; Character: Warm, safe, cheerful
+; Scale: F G A B- C D E
+
+A @1 V13 O4 L4 T90
+; --- A section (bars 1-8) ---
+; Bar 1: F major arpeggio up
+F4 A4 > C4 <
+; Bar 2: Come back down
+> C4 < A4 F4
+; Bar 3: Bb color
+G4 B-4 D4
+; Bar 4: Resolve on C
+> C2. <
+; Bar 5: Ascending sequence
+F8 G8 A4 B-4
+; Bar 6: Reach high
+> C4 D4 E4 <
+; Bar 7: Graceful descent
+F4 E4 D4
+; Bar 8: Cadence on C
+C2.
+; --- B section (bars 9-16) ---
+; Bar 9: Upper F arpeggio
+> F4 A4 C4 <
+; Bar 10: Slight tension
+> E4 D4 C4 <
+; Bar 11: Bb resolution
+> D4 C4 < B-4
+; Bar 12: Rest on A
+A2.
+; Bar 13: Walking back up
+G4 A4 B-4
+; Bar 14: Bright high phrase
+> C4 D4 E4 <
+; Bar 15: Stepwise fill
+F4 G4 A4
+; Bar 16: Final resolve
+F2.
+
+B @2 V9 O3 L4 T90
+; Waltz sustained chord roots (dotted half = 1 bar in 3/4)
+; All notes on one line to avoid B- being misread as track label
+F2. C2. B-2. C2. F2. A2. B-2. C2. A2. A2. B-2. A2. B-2. A2. B-2. F2.
+
+C V12 O2 L4 T90
+; Oom-pah-pah waltz bass (root on beat 1, fifth on beats 2-3)
+F4 C4 C4
+C4 G4 G4
+B-4 F4 F4
+C4 G4 G4
+F4 C4 C4
+A4 E4 E4
+B-4 F4 F4
+C4 G4 G4
+A4 E4 E4
+A4 E4 E4
+B-4 F4 F4
+A4 E4 E4
+B-4 F4 F4
+A4 E4 E4
+B-4 F4 F4
+F4 C4 C4
+
+D V7 L4 Q4 T90
+; Single waltz downbeat per bar (dotted half = 1 bar in 3/4)
+[C2.]16

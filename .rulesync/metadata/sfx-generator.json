@@ -1,6 +1,6 @@
 {
   "component": "sfx_generator",
   "target": "tools/sound/sfx_generator.py",
-  "version": "0.4.6",
-  "description": "OnGen 単体可搬音源生成ツール（PPMCK 方言 + Pyxel 方言 + 音源Lint/解析 + MML拍子メタ情報 + @v/@EP/@EN/@MPマクロ + 行頭マクロ判定修正）"
+  "version": "0.4.7",
+  "description": "OnGen 単体可搬音源生成ツール（PPMCK 方言 + Pyxel 方言 + 音源Lint/解析 + MML拍子メタ情報 + @v/@EP/@EN/@MPマクロ + 行頭マクロ判定修正 + structure-lint非T120テンポ修正 + --preview-bars）"
 }
